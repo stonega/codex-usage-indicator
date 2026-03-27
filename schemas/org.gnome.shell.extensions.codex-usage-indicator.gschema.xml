@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.codex-usage-indicator"
+          path="/org/gnome/shell/extensions/codex-usage-indicator/">
+    <key name="update-interval-seconds" type="i">
+      <default>300</default>
+      <summary>Automatic refresh interval</summary>
+      <description>Number of seconds between usage refreshes.</description>
+    </key>
+  </schema>
+</schemalist>
