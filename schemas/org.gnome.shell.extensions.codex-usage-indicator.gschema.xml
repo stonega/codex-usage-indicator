@@ -7,5 +7,10 @@
       <summary>Automatic refresh interval</summary>
       <description>Number of seconds between usage refreshes.</description>
     </key>
+    <key name="display-mode" type="s">
+      <default>'left'</default>
+      <summary>Usage display mode</summary>
+      <description>Choose whether the extension shows remaining quota or consumed quota.</description>
+    </key>
   </schema>
 </schemalist>

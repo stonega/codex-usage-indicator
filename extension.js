@@ -9,8 +9,9 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {
-    BREAKDOWN_DAYS,
     DEFAULT_UPDATE_INTERVAL_SECONDS,
+    DISPLAY_MODE_LEFT,
+    DISPLAY_MODE_USED,
 } from './constants.js';
 import {loadBearerTokenSync} from './secret.js';
 import {UsageApiClient, UsageApiError} from './usageApi.js';
@@ -28,7 +29,6 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._refreshInFlight = null;
         this._lastUpdated = null;
         this._lastSummary = null;
-        this._lastBreakdown = [];
         this._authFailed = false;
         this._summaryError = null;
 
@@ -45,7 +45,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._buildMenu();
         this.menu.connect('open-state-changed', (_menu, isOpen) => {
             if (isOpen)
-                void this.refresh({includeBreakdown: true});
+                void this.refresh({force: true});
         });
 
         this._settings.connectObject(
@@ -53,9 +53,14 @@ class CodexUsageIndicator extends PanelMenu.Button {
             () => this._restartRefreshTimer(),
             this,
         );
+        this._settings.connectObject(
+            'changed::display-mode',
+            () => this._renderCurrentState(),
+            this,
+        );
 
         this._restartRefreshTimer();
-        void this.refresh({includeBreakdown: false});
+        void this.refresh();
     }
 
     _buildMenu() {
@@ -74,25 +79,25 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const titleItem = new PopupMenu.PopupMenuItem(
-            _('Daily token usage'),
+            _('Usage windows'),
             {reactive: false, can_focus: false},
         );
         this.menu.addMenuItem(titleItem);
 
-        this._breakdownSection = new PopupMenu.PopupMenuSection();
-        this.menu.addMenuItem(this._breakdownSection);
+        this._windowsSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._windowsSection);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this.menu.addAction(_('Refresh now'), () => {
-            void this.refresh({includeBreakdown: true, force: true});
+            void this.refresh({force: true});
         });
         this.menu.addAction(_('Settings'), () => {
             this._extension.openPreferences();
         });
     }
 
-    async refresh({includeBreakdown = false, force = false} = {}) {
+    async refresh({force = false} = {}) {
         if (this._refreshInFlight)
             return this._refreshInFlight;
 
@@ -106,13 +111,13 @@ class CodexUsageIndicator extends PanelMenu.Button {
             this._setLabel(_('Codex: token'));
             this._statusItem.label.text = _('Configure a bearer token in Settings.');
             this._lastUpdatedItem.label.text = _('Last updated: never');
-            this._renderBreakdown([]);
+            this._renderWindows(null);
             return null;
         }
 
         this._summaryError = null;
         this._statusItem.label.text = _('Refreshing usage…');
-        this._refreshInFlight = this._doRefresh(token, includeBreakdown)
+        this._refreshInFlight = this._doRefresh(token)
             .catch(error => {
                 this._handleRefreshError(error);
                 return null;
@@ -124,22 +129,13 @@ class CodexUsageIndicator extends PanelMenu.Button {
         return this._refreshInFlight;
     }
 
-    async _doRefresh(token, includeBreakdown) {
-        const tasks = [this._client.fetchSummary(token)];
-        if (includeBreakdown)
-            tasks.push(this._client.fetchDailyBreakdown(token));
-
-        const [summary, breakdown] = await Promise.all(tasks);
+    async _doRefresh(token) {
+        const summary = await this._client.fetchSummary(token);
         this._authFailed = false;
         this._lastSummary = summary;
-        if (breakdown)
-            this._lastBreakdown = breakdown;
         this._lastUpdated = GLib.DateTime.new_now_local();
 
-        this._statusItem.label.text = formatSummary(summary);
-        this._lastUpdatedItem.label.text = `Last updated: ${this._lastUpdated.format('%F %R')}`;
-        this._setLabel(formatPanelLabel(summary));
-        this._renderBreakdown(this._lastBreakdown);
+        this._renderCurrentState();
     }
 
     _handleRefreshError(error) {
@@ -148,14 +144,15 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
         const detail = error instanceof Error ? error.message : _('Unknown error');
         this._summaryError = detail;
+        const displayMode = this._getDisplayMode();
 
         const staleSummary = this._lastSummary
-            ? `${formatSummary(this._lastSummary)} (${_('stale')})`
+            ? `${formatSummary(this._lastSummary, displayMode)} (${_('stale')})`
             : _('Unable to load usage');
 
         this._statusItem.label.text = staleSummary;
         this._setLabel(this._lastSummary
-            ? `${formatPanelLabel(this._lastSummary)} !`
+            ? `${formatPanelLabel(this._lastSummary, displayMode)} !`
             : _('Codex: error'));
 
         if (this._lastUpdated) {
@@ -165,24 +162,35 @@ class CodexUsageIndicator extends PanelMenu.Button {
             this._lastUpdatedItem.label.text = `Last updated: never (${detail})`;
         }
 
-        this._renderBreakdown(this._lastBreakdown);
+        this._renderWindows(this._lastSummary);
         logError(error, '[codex-usage-indicator] refresh failed');
     }
 
-    _renderBreakdown(entries) {
-        this._breakdownSection.removeAll();
+    _renderCurrentState() {
+        if (!this._lastSummary)
+            return;
 
-        if (!entries || entries.length === 0) {
+        const displayMode = this._getDisplayMode();
+        this._statusItem.label.text = formatSummary(this._lastSummary, displayMode);
+        this._lastUpdatedItem.label.text = `Last updated: ${this._lastUpdated.format('%F %R')}`;
+        this._setLabel(formatPanelLabel(this._lastSummary, displayMode));
+        this._renderWindows(this._lastSummary);
+    }
+
+    _renderWindows(summary) {
+        this._windowsSection.removeAll();
+
+        const windows = getVisibleWindows(summary);
+        if (windows.length === 0) {
             const placeholder = new PopupMenu.PopupMenuItem(
-                _('No daily breakdown data available.'),
+                _('No 5h or week data available.'),
                 {reactive: false, can_focus: false},
             );
-            this._breakdownSection.addMenuItem(placeholder);
+            this._windowsSection.addMenuItem(placeholder);
             return;
         }
 
-        for (const entry of entries.slice(0, BREAKDOWN_DAYS)) {
-            const subtitle = formatBreakdownDetails(entry.details);
+        for (const window of windows) {
             const menuItem = new PopupMenu.PopupBaseMenuItem({
                 reactive: false,
                 can_focus: false,
@@ -193,10 +201,11 @@ class CodexUsageIndicator extends PanelMenu.Button {
                 x_expand: true,
             });
             content.add_child(new St.Label({
-                text: `${formatDate(entry.date)}  ${formatBreakdownValue(entry.total)}`,
+                text: `${window.title}  ${formatWindowValue(window, this._getDisplayMode())}`,
                 x_align: Clutter.ActorAlign.START,
             }));
 
+            const subtitle = formatWindowSubtitle(window);
             if (subtitle) {
                 content.add_child(new St.Label({
                     text: subtitle,
@@ -206,7 +215,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
             }
 
             menuItem.add_child(content);
-            this._breakdownSection.addMenuItem(menuItem);
+            this._windowsSection.addMenuItem(menuItem);
         }
     }
 
@@ -225,7 +234,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
             GLib.PRIORITY_DEFAULT,
             interval,
             () => {
-                void this.refresh({includeBreakdown: this.menu.isOpen});
+                void this.refresh();
                 return GLib.SOURCE_CONTINUE;
             },
         );
@@ -233,6 +242,11 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
     _setLabel(text) {
         this._label.text = text;
+    }
+
+    _getDisplayMode() {
+        const mode = this._settings.get_string('display-mode');
+        return mode === DISPLAY_MODE_USED ? DISPLAY_MODE_USED : DISPLAY_MODE_LEFT;
     }
 
     destroy() {
@@ -259,49 +273,102 @@ export default class CodexUsageExtension extends Extension {
     }
 }
 
-function formatPanelLabel(summary) {
-    if (summary.used !== null && summary.limit !== null)
-        return `Codex: ${formatCompact(summary.used)} / ${formatCompact(summary.limit)}`;
+function formatPanelLabel(summary, displayMode) {
+    if (displayMode === DISPLAY_MODE_USED) {
+        if (summary.used !== null)
+            return `Codex: ${formatCompact(summary.used)} used`;
 
-    if (summary.used !== null)
-        return `Codex: ${formatCompact(summary.used)}`;
+        if (summary.percent !== null)
+            return `Codex: ${Math.round(summary.percent * 100)}% used`;
+    } else {
+        if (summary.left !== null)
+            return `Codex: ${formatCompact(summary.left)} left`;
 
-    if (summary.percent !== null)
-        return `Codex: ${Math.round(summary.percent * 100)}%`;
+        if (summary.leftPercent !== null)
+            return `Codex: ${Math.round(summary.leftPercent * 100)}% left`;
+    }
 
     return _('Codex: n/a');
 }
 
-function formatSummary(summary) {
-    if (summary.used !== null && summary.limit !== null) {
-        const percent = summary.percent !== null
-            ? ` (${Math.round(summary.percent * 100)}%)`
-            : '';
-        return `${formatNumber(summary.used)} used of ${formatNumber(summary.limit)}${percent}`;
-    }
+function formatSummary(summary, displayMode) {
+    const planType = summary.planType ? `${summary.planType} · ` : '';
+    const resetText = formatResetText(summary.resetAt, summary.resetAfterSeconds);
 
-    if (summary.used !== null)
-        return `${formatNumber(summary.used)} used`;
+    if (displayMode === DISPLAY_MODE_USED) {
+        if (summary.used !== null && summary.limit !== null) {
+            const percent = summary.percent !== null
+                ? ` (${Math.round(summary.percent * 100)}% used)`
+                : '';
+            return `${planType}${formatNumber(summary.used)} used of ${formatNumber(summary.limit)}${percent}${resetText}`;
+        }
 
-    if (summary.percent !== null) {
-        const planType = summary.planType ? `${summary.planType} plan, ` : '';
-        const resetText = formatResetText(summary.resetAt, summary.resetAfterSeconds);
-        return `${planType}${Math.round(summary.percent * 100)}% used${resetText}`;
+        if (summary.used !== null)
+            return `${planType}${formatNumber(summary.used)} used${resetText}`;
+
+        if (summary.percent !== null)
+            return `${planType}${Math.round(summary.percent * 100)}% used${resetText}`;
+    } else {
+        if (summary.left !== null && summary.limit !== null) {
+            const percent = summary.leftPercent !== null
+                ? ` (${Math.round(summary.leftPercent * 100)}% left)`
+                : '';
+            return `${planType}${formatNumber(summary.left)} left of ${formatNumber(summary.limit)}${percent}${resetText}`;
+        }
+
+        if (summary.left !== null)
+            return `${planType}${formatNumber(summary.left)} left${resetText}`;
+
+        if (summary.leftPercent !== null)
+            return `${planType}${Math.round(summary.leftPercent * 100)}% left${resetText}`;
     }
 
     return _('Usage data available, but no totals were recognized.');
 }
 
-function formatBreakdownDetails(details) {
-    if (!details)
-        return '';
+function getVisibleWindows(summary) {
+    if (!summary)
+        return [];
 
-    return Object.entries(details)
-        .sort((left, right) => right[1] - left[1])
-        .slice(0, 3)
-        .filter(([, total]) => total > 0)
-        .map(([name, total]) => `${name}: ${formatBreakdownValue(total)}`)
-        .join('  •  ');
+    const windows = [];
+    if (summary.primaryWindow)
+        windows.push({title: '5h', ...summary.primaryWindow});
+    if (summary.weekWindow)
+        windows.push({title: 'Week', ...summary.weekWindow});
+    return windows;
+}
+
+function formatWindowValue(window, displayMode) {
+    if (displayMode === DISPLAY_MODE_USED) {
+        if (window.used !== null)
+            return `${formatCompact(window.used)} used`;
+
+        if (window.percent !== null)
+            return `${Math.round(window.percent * 100)}% used`;
+    } else {
+        if (window.left !== null)
+            return `${formatCompact(window.left)} left`;
+
+        if (window.leftPercent !== null)
+            return `${Math.round(window.leftPercent * 100)}% left`;
+    }
+
+    return _('Unavailable');
+}
+
+function formatWindowSubtitle(window) {
+    const parts = [];
+
+    if (window.limit !== null)
+        parts.push(`${formatNumber(window.limit)} total`);
+
+    if (window.used !== null)
+        parts.push(`${formatNumber(window.used)} used`);
+
+    if (window.resetAfterSeconds)
+        parts.push(`resets in ${formatDuration(window.resetAfterSeconds)}`);
+
+    return parts.join('  •  ');
 }
 
 function formatNumber(value) {
@@ -313,20 +380,6 @@ function formatCompact(value) {
         notation: 'compact',
         maximumFractionDigits: 1,
     }).format(value);
-}
-
-function formatBreakdownValue(value) {
-    return new Intl.NumberFormat(undefined, {
-        minimumFractionDigits: value % 1 === 0 ? 0 : 1,
-        maximumFractionDigits: 1,
-    }).format(value);
-}
-
-function formatDate(rawDate) {
-    const parsed = GLib.DateTime.new_from_iso8601(rawDate, null);
-    if (!parsed)
-        return rawDate;
-    return parsed.format('%b %d');
 }
 
 function formatResetText(resetAt, resetAfterSeconds) {

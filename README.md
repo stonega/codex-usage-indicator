@@ -1,12 +1,13 @@
 # Codex Usage Indicator
 
-GNOME Shell extension for GNOME Shell `50` that shows Codex usage in the top bar and displays the last 7 days of daily token usage in the popup.
+GNOME Shell extension for GNOME Shell `50` that shows remaining Codex usage in the top bar and displays the current 5-hour and weekly windows in the popup.
 
 ## Features
 
-- Top-bar label showing `used / limit`
-- Popup with the latest fetch timestamp and 7-day token breakdown
+- Top-bar label showing remaining or used usage
+- Popup with the latest fetch timestamp plus 5-hour and weekly usage windows
 - Configurable refresh interval
+- Toggle to show `left` or `used` values
 - Bearer token stored in the GNOME keyring through Secret Service
 
 ## Files

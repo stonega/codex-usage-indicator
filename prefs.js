@@ -5,7 +5,11 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import {DEFAULT_UPDATE_INTERVAL_SECONDS} from './constants.js';
+import {
+    DEFAULT_UPDATE_INTERVAL_SECONDS,
+    DISPLAY_MODE_LEFT,
+    DISPLAY_MODE_USED,
+} from './constants.js';
 import {
     clearBearerTokenSync,
     loadBearerTokenSync,
@@ -31,7 +35,7 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
     _buildGeneralGroup() {
         const group = new Adw.PreferencesGroup({
             title: _('Refresh'),
-            description: _('Control how often the panel refreshes Codex usage from ChatGPT.'),
+            description: _('Control how the panel displays and refreshes Codex usage from ChatGPT.'),
         });
 
         const adjustment = new Gtk.Adjustment({
@@ -58,6 +62,24 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
         );
 
         group.add(row);
+
+        const displayRow = new Adw.ComboRow({
+            title: _('Display value'),
+            subtitle: _('Choose whether the panel shows remaining or used quota.'),
+            model: Gtk.StringList.new([
+                _('Left'),
+                _('Used'),
+            ]),
+            selected: this._getDisplayMode() === DISPLAY_MODE_USED ? 1 : 0,
+        });
+        displayRow.connect('notify::selected', combo => {
+            this._settings.set_string(
+                'display-mode',
+                combo.selected === 1 ? DISPLAY_MODE_USED : DISPLAY_MODE_LEFT,
+            );
+        });
+        group.add(displayRow);
+
         return group;
     }
 
@@ -130,10 +152,13 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
         this._statusRow.subtitle = _('Testing token…');
         try {
             const summary = await this._client.fetchSummary(token);
-            const used = summary.used !== null
-                ? new Intl.NumberFormat().format(Math.round(summary.used))
+            const displayMode = this._getDisplayMode();
+            const value = displayMode === DISPLAY_MODE_USED ? summary.used : summary.left;
+            const label = displayMode === DISPLAY_MODE_USED ? _('used') : _('left');
+            const formatted = value !== null
+                ? new Intl.NumberFormat().format(Math.round(value))
                 : _('available');
-            this._statusRow.subtitle = _('Connection OK') + ` · ${used}`;
+            this._statusRow.subtitle = _('Connection OK') + ` · ${formatted} ${label}`;
         } catch (error) {
             if (error instanceof UsageApiError && error.isAuthError)
                 this._statusRow.subtitle = _('Authentication failed. Check the token.');
@@ -142,6 +167,11 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
             else
                 this._statusRow.subtitle = _('Unknown error while testing token.');
         }
+    }
+
+    _getDisplayMode() {
+        const mode = this._settings.get_string('display-mode');
+        return mode === DISPLAY_MODE_USED ? DISPLAY_MODE_USED : DISPLAY_MODE_LEFT;
     }
 });
 

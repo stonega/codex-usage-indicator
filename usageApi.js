@@ -4,9 +4,9 @@ import Soup from 'gi://Soup?version=3.0';
 
 import {
     API_BASE_URL,
-    BREAKDOWN_DAYS,
-    BREAKDOWN_ENDPOINT,
+    PRIMARY_WINDOW_HOURS,
     SUMMARY_ENDPOINT,
+    WEEK_WINDOW_DAYS,
 } from './constants.js';
 
 Gio._promisify(Soup.Session.prototype, 'send_and_read_async', 'send_and_read_finish');
@@ -49,24 +49,6 @@ const PERCENT_KEYS = [
     'utilization',
 ];
 
-const DATE_KEYS = [
-    'date',
-    'day',
-    'bucket',
-    'bucket_start',
-    'period_start',
-    'start_date',
-];
-
-const DETAIL_KEYS = [
-    'breakdown',
-    'details',
-    'models',
-    'by_model',
-    'categories',
-    'by_category',
-];
-
 export class UsageApiError extends Error {
     constructor(message, {statusCode = 0, payload = null} = {}) {
         super(message);
@@ -90,11 +72,6 @@ export class UsageApiClient {
     async fetchSummary(token) {
         const payload = await this._getJson(SUMMARY_ENDPOINT, token);
         return normalizeSummary(payload);
-    }
-
-    async fetchDailyBreakdown(token) {
-        const payload = await this._getJson(BREAKDOWN_ENDPOINT, token);
-        return normalizeDailyBreakdown(payload).slice(0, BREAKDOWN_DAYS);
     }
 
     destroy() {
@@ -147,133 +124,233 @@ export function decodeBytes(bytes) {
 }
 
 export function normalizeSummary(payload) {
-    const rateLimitSummary = normalizeRateLimitSummary(payload);
-    if (rateLimitSummary)
-        return rateLimitSummary;
+    const windows = normalizeRateLimitWindows(payload);
+    const primaryWindow = findPrimaryWindow(windows);
+    const weekWindow = findWeekWindow(windows);
+    const activeWindow = primaryWindow ?? weekWindow ?? windows[0] ?? null;
 
+    let used = null;
+    let limit = null;
     for (const [usedKey, limitKey] of SUMMARY_PATH_HINTS) {
-        const used = findNumberByKey(payload, usedKey);
-        const limit = findNumberByKey(payload, limitKey);
-        if (used !== null && limit !== null) {
-            return {
-                used,
-                limit,
-                percent: limit > 0 ? used / limit : null,
-                raw: payload,
-            };
-        }
+        used = findNumberByKey(payload, usedKey);
+        limit = findNumberByKey(payload, limitKey);
+        if (used !== null && limit !== null)
+            break;
     }
 
-    const used = findFirstNumber(payload, NUMBER_KEYS);
-    const limit = findFirstNumber(payload, LIMIT_KEYS);
-    const percent = findFirstNumber(payload, PERCENT_KEYS);
+    if (used === null || limit === null) {
+        used = activeWindow?.used ?? findFirstNumber(payload, NUMBER_KEYS);
+        limit = activeWindow?.limit ?? findFirstNumber(payload, LIMIT_KEYS);
+    }
+
+    const percent = normalizePercent(
+        activeWindow?.percent ?? findFirstNumber(payload, PERCENT_KEYS),
+        used,
+        limit,
+    );
+    const left = used !== null && limit !== null ? Math.max(limit - used, 0) : null;
 
     return {
         used,
         limit,
-        percent: normalizePercent(percent, used, limit),
-        resetAt: null,
-        resetAfterSeconds: null,
+        left,
+        percent,
+        leftPercent: percent !== null ? Math.max(1 - percent, 0) : null,
+        resetAt: activeWindow?.resetAt ?? null,
+        resetAfterSeconds: activeWindow?.resetAfterSeconds ?? null,
         planType: findFirstString(payload, ['plan_type']),
+        windows,
+        primaryWindow,
+        weekWindow,
         raw: payload,
     };
 }
 
-function normalizeRateLimitSummary(payload) {
-    const primaryWindow = payload?.rate_limit?.primary_window;
-    const usedPercent = coerceNumber(primaryWindow?.used_percent);
-    if (usedPercent === null)
+function normalizeRateLimitWindows(payload) {
+    const windows = [];
+    collectRateLimitWindows(payload, [], windows);
+
+    const deduped = [];
+    for (const window of windows) {
+        const duplicate = deduped.some(candidate =>
+            candidate.windowSeconds === window.windowSeconds &&
+            candidate.percent === window.percent &&
+            candidate.used === window.used &&
+            candidate.limit === window.limit &&
+            candidate.resetAt === window.resetAt &&
+            candidate.resetAfterSeconds === window.resetAfterSeconds
+        );
+        if (!duplicate)
+            deduped.push(window);
+    }
+
+    return deduped.sort((left, right) => {
+        const leftSeconds = left.windowSeconds ?? Number.MAX_SAFE_INTEGER;
+        const rightSeconds = right.windowSeconds ?? Number.MAX_SAFE_INTEGER;
+        return leftSeconds - rightSeconds;
+    });
+}
+
+function collectRateLimitWindows(value, path, output) {
+    if (!value || typeof value !== 'object')
+        return;
+
+    if (Array.isArray(value)) {
+        for (const item of value)
+            collectRateLimitWindows(item, path, output);
+        return;
+    }
+
+    const normalized = normalizeRateLimitWindow(value, path);
+    if (normalized)
+        output.push(normalized);
+
+    for (const [key, nested] of Object.entries(value))
+        collectRateLimitWindows(nested, [...path, key], output);
+}
+
+function normalizeRateLimitWindow(value, path) {
+    const used = findLocalFirstNumber(value, NUMBER_KEYS);
+    const limit = findLocalFirstNumber(value, LIMIT_KEYS);
+    const percent = normalizePercent(findLocalFirstNumber(value, PERCENT_KEYS), used, limit);
+    const resetAt = coerceNumber(findLocalValueByKey(value, 'reset_at'));
+    const resetAfterSeconds = coerceNumber(findLocalValueByKey(value, 'reset_after_seconds'));
+    const windowSeconds = findWindowSeconds(value, resetAfterSeconds);
+    const pathHint = path.some(segment => /window|rate_limit/i.test(segment));
+
+    if (percent === null && (used === null || limit === null))
+        return null;
+
+    if (windowSeconds === null && resetAt === null && resetAfterSeconds === null && !pathHint)
         return null;
 
     return {
-        used: null,
-        limit: null,
-        percent: normalizePercent(usedPercent, null, null),
-        resetAt: coerceNumber(primaryWindow?.reset_at),
-        resetAfterSeconds: coerceNumber(primaryWindow?.reset_after_seconds),
-        planType: findFirstString(payload, ['plan_type']),
-        raw: payload,
+        id: path.join('.') || 'window',
+        label: inferWindowLabel(value, path, windowSeconds),
+        used,
+        limit,
+        left: used !== null && limit !== null ? Math.max(limit - used, 0) : null,
+        percent,
+        leftPercent: percent !== null ? Math.max(1 - percent, 0) : null,
+        resetAt,
+        resetAfterSeconds,
+        windowSeconds,
     };
 }
 
-export function normalizeDailyBreakdown(payload) {
-    const candidateArrays = collectCandidateArrays(payload);
-    const normalized = [];
-
-    for (const array of candidateArrays) {
-        for (const item of array) {
-            const normalizedItem = normalizeDailyEntry(item);
-            if (normalizedItem)
-                normalized.push(normalizedItem);
-        }
-
-        if (normalized.length > 0)
-            break;
-    }
-
-    return normalized
-        .sort((left, right) => right.date.localeCompare(left.date));
+function findPrimaryWindow(windows) {
+    const targetSeconds = PRIMARY_WINDOW_HOURS * 3600;
+    return findWindowByDuration(windows, targetSeconds, 2 * 3600)
+        ?? windows.find(window => /(^| )5h( |$)|primary/i.test(window.label ?? ''))
+        ?? null;
 }
 
-function normalizeDailyEntry(item) {
-    if (!item || typeof item !== 'object' || Array.isArray(item))
-        return null;
-
-    const surfaceValues = normalizeSurfaceUsageValues(item.product_surface_usage_values);
-    if (surfaceValues) {
-        return {
-            date: item.date?.trim?.() ?? null,
-            total: sumObjectValues(surfaceValues),
-            details: surfaceValues,
-            raw: item,
-        };
-    }
-
-    const date = findFirstString(item, DATE_KEYS) ?? normalizeDateGuess(item);
-    const total = findFirstNumber(item, NUMBER_KEYS) ?? findFirstNumber(item, ['tokens']);
-    if (!date || total === null)
-        return null;
-
-    const details = findDetails(item);
-    return {
-        date,
-        total,
-        details,
-        raw: item,
-    };
+function findWeekWindow(windows) {
+    const targetSeconds = WEEK_WINDOW_DAYS * 86400;
+    return findWindowByDuration(windows, targetSeconds, 86400)
+        ?? windows.find(window => /week|7d/i.test(window.label ?? ''))
+        ?? null;
 }
 
-function findDetails(item) {
-    for (const key of DETAIL_KEYS) {
-        const value = findValueByKey(item, key);
-        if (value && typeof value === 'object' && !Array.isArray(value)) {
-            const entries = Object.entries(value)
-                .map(([name, rawValue]) => [name, coerceNumber(rawValue)])
-                .filter(([, amount]) => amount !== null);
-            if (entries.length > 0)
-                return Object.fromEntries(entries);
-        }
+function findWindowByDuration(windows, targetSeconds, toleranceSeconds) {
+    return windows.find(window =>
+        window.windowSeconds !== null &&
+        Math.abs(window.windowSeconds - targetSeconds) <= toleranceSeconds
+    ) ?? null;
+}
+
+function findWindowSeconds(value, resetAfterSeconds) {
+    const seconds = findLocalFirstNumber(value, [
+        'window_seconds',
+        'duration_seconds',
+    ]);
+    if (seconds !== null)
+        return seconds;
+
+    const minutes = findLocalFirstNumber(value, [
+        'window_minutes',
+        'duration_minutes',
+        'window_mins',
+    ]);
+    if (minutes !== null)
+        return minutes * 60;
+
+    const hours = findLocalFirstNumber(value, ['window_hours', 'duration_hours']);
+    if (hours !== null)
+        return hours * 3600;
+
+    const days = findLocalFirstNumber(value, ['window_days', 'duration_days']);
+    if (days !== null)
+        return days * 86400;
+
+    if (resetAfterSeconds !== null)
+        return resetAfterSeconds;
+
+    return null;
+}
+
+function inferWindowLabel(value, path, windowSeconds) {
+    const explicitLabel = findLocalFirstString(value, ['label', 'name', 'window_name', 'title']);
+    if (explicitLabel)
+        return explicitLabel;
+
+    if (windowSeconds !== null)
+        return formatWindowDuration(windowSeconds);
+
+    const lastSegment = path[path.length - 1];
+    if (lastSegment)
+        return lastSegment.replaceAll('_', ' ');
+
+    return 'Window';
+}
+
+function formatWindowDuration(windowSeconds) {
+    const hours = windowSeconds / 3600;
+    const days = windowSeconds / 86400;
+
+    if (Math.abs(hours - PRIMARY_WINDOW_HOURS) < 0.01)
+        return '5h';
+
+    if (Math.abs(days - WEEK_WINDOW_DAYS) < 0.01)
+        return 'Week';
+
+    if (days >= 1 && Number.isInteger(days))
+        return `${days}d`;
+
+    if (hours >= 1 && Number.isInteger(hours))
+        return `${hours}h`;
+
+    return `${Math.round(windowSeconds / 60)}m`;
+}
+
+function findLocalFirstNumber(value, keys) {
+    for (const key of keys) {
+        const number = coerceNumber(findLocalValueByKey(value, key));
+        if (number !== null)
+            return number;
     }
 
     return null;
 }
 
-function collectCandidateArrays(value) {
-    const arrays = [];
-
-    if (Array.isArray(value)) {
-        arrays.push(value);
-        return arrays;
+function findLocalFirstString(value, keys) {
+    for (const key of keys) {
+        const found = findLocalValueByKey(value, key);
+        if (typeof found === 'string' && found.trim())
+            return found.trim();
     }
 
-    if (!value || typeof value !== 'object')
-        return arrays;
+    return null;
+}
 
-    for (const nested of Object.values(value)) {
-        arrays.push(...collectCandidateArrays(nested));
-    }
+function findLocalValueByKey(value, targetKey) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return null;
 
-    return arrays;
+    if (!Object.prototype.hasOwnProperty.call(value, targetKey))
+        return null;
+
+    return value[targetKey];
 }
 
 function findFirstNumber(value, keys) {
@@ -350,34 +427,4 @@ function normalizePercent(percent, used, limit) {
         return used / limit;
 
     return null;
-}
-
-function normalizeDateGuess(item) {
-    for (const value of Object.values(item)) {
-        if (typeof value !== 'string')
-            continue;
-        const trimmed = value.trim();
-        if (/^\d{4}-\d{2}-\d{2}/.test(trimmed))
-            return trimmed.slice(0, 10);
-    }
-
-    return null;
-}
-
-function normalizeSurfaceUsageValues(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value))
-        return null;
-
-    const entries = Object.entries(value)
-        .map(([name, rawValue]) => [name, coerceNumber(rawValue)])
-        .filter(([, amount]) => amount !== null);
-
-    if (entries.length === 0)
-        return null;
-
-    return Object.fromEntries(entries);
-}
-
-function sumObjectValues(value) {
-    return Object.values(value).reduce((sum, amount) => sum + amount, 0);
 }
