@@ -292,7 +292,7 @@ function formatPanelLabel(summary, displayMode) {
 }
 
 function formatSummary(summary, displayMode) {
-    const planType = summary.planType ? `${summary.planType} · ` : '';
+    const planType = summary.planType ? `${summary.planType.toUpperCase()} · ` : '';
     const resetText = formatResetText(summary.resetAt, summary.resetAfterSeconds);
 
     if (displayMode === DISPLAY_MODE_USED) {

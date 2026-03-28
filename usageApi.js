@@ -42,6 +42,7 @@ const LIMIT_KEYS = [
 ];
 
 const PERCENT_KEYS = [
+    'used_percent',
     'percent',
     'percentage',
     'usage_percent',
@@ -125,9 +126,10 @@ export function decodeBytes(bytes) {
 
 export function normalizeSummary(payload) {
     const windows = normalizeRateLimitWindows(payload);
-    const primaryWindow = findPrimaryWindow(windows);
-    const weekWindow = findWeekWindow(windows);
-    const activeWindow = primaryWindow ?? weekWindow ?? windows[0] ?? null;
+    const usageWindows = selectUsageWindows(windows);
+    const primaryWindow = findPrimaryWindow(usageWindows);
+    const weekWindow = findWeekWindow(usageWindows);
+    const activeWindow = primaryWindow ?? weekWindow ?? usageWindows[0] ?? null;
 
     let used = null;
     let limit = null;
@@ -159,7 +161,7 @@ export function normalizeSummary(payload) {
         resetAt: activeWindow?.resetAt ?? null,
         resetAfterSeconds: activeWindow?.resetAfterSeconds ?? null,
         planType: findFirstString(payload, ['plan_type']),
-        windows,
+        windows: usageWindows,
         primaryWindow,
         weekWindow,
         raw: payload,
@@ -227,6 +229,7 @@ function normalizeRateLimitWindow(value, path) {
     return {
         id: path.join('.') || 'window',
         label: inferWindowLabel(value, path, windowSeconds),
+        rootKey: path[0] ?? null,
         used,
         limit,
         left: used !== null && limit !== null ? Math.max(limit - used, 0) : null,
@@ -236,6 +239,14 @@ function normalizeRateLimitWindow(value, path) {
         resetAfterSeconds,
         windowSeconds,
     };
+}
+
+function selectUsageWindows(windows) {
+    const rateLimitWindows = windows.filter(window => window.rootKey === 'rate_limit');
+    if (rateLimitWindows.length > 0)
+        return rateLimitWindows;
+
+    return windows.filter(window => window.rootKey !== 'code_review_rate_limit');
 }
 
 function findPrimaryWindow(windows) {
@@ -263,6 +274,7 @@ function findWindowSeconds(value, resetAfterSeconds) {
     const seconds = findLocalFirstNumber(value, [
         'window_seconds',
         'duration_seconds',
+        'limit_window_seconds',
     ]);
     if (seconds !== null)
         return seconds;
@@ -418,8 +430,26 @@ function coerceNumber(value) {
 
 function normalizePercent(percent, used, limit) {
     if (percent !== null) {
-        if (percent > 1)
+        if (used !== null && limit !== null && limit > 0) {
+            const ratio = used / limit;
+            const directPercent = percent >= 0 && percent <= 1 ? percent : null;
+            const scaledPercent = percent >= 0 && percent <= 100 ? percent / 100 : null;
+
+            if (directPercent !== null && scaledPercent !== null)
+                return Math.abs(directPercent - ratio) <= Math.abs(scaledPercent - ratio)
+                    ? directPercent
+                    : scaledPercent;
+
+            if (scaledPercent !== null)
+                return scaledPercent;
+
+            if (directPercent !== null)
+                return directPercent;
+        }
+
+        if (percent > 1 || Number.isInteger(percent))
             return percent / 100;
+
         return percent;
     }
 
