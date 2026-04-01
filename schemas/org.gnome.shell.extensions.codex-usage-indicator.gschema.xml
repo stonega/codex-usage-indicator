@@ -12,5 +12,15 @@
       <summary>Usage display mode</summary>
       <description>Choose whether the extension shows remaining quota or consumed quota.</description>
     </key>
+    <key name="accounts-json" type="s">
+      <default>'[]'</default>
+      <summary>Configured accounts</summary>
+      <description>JSON-encoded list of configured Codex accounts.</description>
+    </key>
+    <key name="visible-account-ids" type="as">
+      <default>[]</default>
+      <summary>Visible accounts</summary>
+      <description>Account IDs currently selected for display in the indicator and popup.</description>
+    </key>
   </schema>
 </schemalist>

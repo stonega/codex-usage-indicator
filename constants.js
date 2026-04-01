@@ -5,9 +5,11 @@ export const DISPLAY_MODE_USED = 'used';
 
 export const API_BASE_URL = 'https://chatgpt.com';
 export const SUMMARY_ENDPOINT = '/backend-api/wham/usage';
+export const ME_ENDPOINT = '/backend-api/me';
 export const PRIMARY_WINDOW_HOURS = 5;
 export const WEEK_WINDOW_DAYS = 7;
+export const PROFILE_CACHE_TTL_SECONDS = 86400;
 
 export const SECRET_SCHEMA_NAME = 'org.gnome.shell.extensions.codex-usage-indicator.token';
-export const SECRET_TOKEN_ACCOUNT = 'bearer-token';
+export const LEGACY_SECRET_TOKEN_ACCOUNT = 'bearer-token';
 export const SECRET_TOKEN_LABEL = 'Codex Usage Indicator bearer token';

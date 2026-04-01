@@ -9,12 +9,20 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {
+    ensureLegacyAccountMigration,
+    getAccountDisplayName,
+    getAccountShortName,
+    getVisibleAccounts,
+    readAccounts,
+    updateAccountProfile,
+} from './accounts.js';
+import {
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DISPLAY_MODE_LEFT,
     DISPLAY_MODE_USED,
 } from './constants.js';
 import {loadBearerTokenSync} from './secret.js';
-import {UsageApiClient, UsageApiError} from './usageApi.js';
+import {shouldRefreshProfile, UsageApiClient} from './usageApi.js';
 
 const CodexUsageIndicator = GObject.registerClass(
 class CodexUsageIndicator extends PanelMenu.Button {
@@ -25,12 +33,11 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._settings = extension.getSettings();
         this._client = new UsageApiClient();
 
+        ensureLegacyAccountMigration(this._settings);
+
         this._refreshSourceId = null;
         this._refreshInFlight = null;
-        this._lastUpdated = null;
-        this._lastSummary = null;
-        this._authFailed = false;
-        this._summaryError = null;
+        this._accountStates = new Map();
 
         const box = new St.BoxLayout({
             style_class: 'panel-status-menu-box',
@@ -45,7 +52,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._buildMenu();
         this.menu.connect('open-state-changed', (_menu, isOpen) => {
             if (isOpen)
-                void this.refresh({force: true});
+                void this.refresh();
         });
 
         this._settings.connectObject(
@@ -58,8 +65,19 @@ class CodexUsageIndicator extends PanelMenu.Button {
             () => this._renderCurrentState(),
             this,
         );
+        this._settings.connectObject(
+            'changed::accounts-json',
+            () => this._handleAccountsChanged(),
+            this,
+        );
+        this._settings.connectObject(
+            'changed::visible-account-ids',
+            () => this._handleAccountsChanged(),
+            this,
+        );
 
         this._restartRefreshTimer();
+        this._renderCurrentState();
         void this.refresh();
     }
 
@@ -79,144 +97,173 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const titleItem = new PopupMenu.PopupMenuItem(
-            _('Usage windows'),
+            _('Accounts'),
             {reactive: false, can_focus: false},
         );
         this.menu.addMenuItem(titleItem);
 
-        this._windowsSection = new PopupMenu.PopupMenuSection();
-        this.menu.addMenuItem(this._windowsSection);
+        this._accountsSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._accountsSection);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this.menu.addAction(_('Refresh now'), () => {
-            void this.refresh({force: true});
+            void this.refresh();
         });
         this.menu.addAction(_('Settings'), () => {
             this._extension.openPreferences();
         });
     }
 
-    async refresh({force = false} = {}) {
+    _handleAccountsChanged() {
+        ensureLegacyAccountMigration(this._settings);
+
+        const currentAccountIds = new Set(readAccounts(this._settings).map(account => account.id));
+        for (const accountId of this._accountStates.keys()) {
+            if (!currentAccountIds.has(accountId))
+                this._accountStates.delete(accountId);
+        }
+
+        this._renderCurrentState();
+        void this.refresh();
+    }
+
+    async refresh() {
         if (this._refreshInFlight)
             return this._refreshInFlight;
 
-        if (!force && this._authFailed)
-            return null;
-
-        const token = loadBearerTokenSync();
-        if (!token) {
-            this._authFailed = false;
-            this._summaryError = _('Bearer token required');
-            this._setLabel(_('Codex: token'));
-            this._statusItem.label.text = _('Configure a bearer token in Settings.');
-            this._lastUpdatedItem.label.text = _('Last updated: never');
-            this._renderWindows(null);
+        const visibleAccounts = getVisibleAccounts(this._settings);
+        if (visibleAccounts.length === 0) {
+            this._renderCurrentState();
             return null;
         }
 
-        this._summaryError = null;
         this._statusItem.label.text = _('Refreshing usage…');
-        this._refreshInFlight = this._doRefresh(token)
+        this._refreshInFlight = Promise.all(visibleAccounts.map(account => this._refreshAccount(account)))
             .catch(error => {
-                this._handleRefreshError(error);
-                return null;
+                logError(error, '[codex-usage-indicator] refresh failed');
             })
             .finally(() => {
                 this._refreshInFlight = null;
+                this._renderCurrentState();
             });
 
         return this._refreshInFlight;
     }
 
-    async _doRefresh(token) {
-        const summary = await this._client.fetchSummary(token);
-        this._authFailed = false;
-        this._lastSummary = summary;
-        this._lastUpdated = GLib.DateTime.new_now_local();
+    async _refreshAccount(account) {
+        const state = this._getAccountState(account);
+        const token = loadBearerTokenSync(account.id);
 
-        this._renderCurrentState();
-    }
-
-    _handleRefreshError(error) {
-        if (error instanceof UsageApiError && error.isAuthError)
-            this._authFailed = true;
-
-        const detail = error instanceof Error ? error.message : _('Unknown error');
-        this._summaryError = detail;
-        const displayMode = this._getDisplayMode();
-
-        const staleSummary = this._lastSummary
-            ? `${formatSummary(this._lastSummary, displayMode)} (${_('stale')})`
-            : _('Unable to load usage');
-
-        this._statusItem.label.text = staleSummary;
-        this._setLabel(this._lastSummary
-            ? `${formatPanelLabel(this._lastSummary, displayMode)} !`
-            : _('Codex: error'));
-
-        if (this._lastUpdated) {
-            this._lastUpdatedItem.label.text =
-                `Last updated: ${this._lastUpdated.format('%F %R')} (${detail})`;
-        } else {
-            this._lastUpdatedItem.label.text = `Last updated: never (${detail})`;
+        if (!token) {
+            state.error = _('Bearer token required');
+            state.authFailed = false;
+            return;
         }
 
-        this._renderWindows(this._lastSummary);
-        logError(error, '[codex-usage-indicator] refresh failed');
+        try {
+            state.summary = await this._client.fetchSummary(token);
+            state.lastUpdated = GLib.DateTime.new_now_local();
+            if (shouldRefreshProfile(account.profile)) {
+                try {
+                    const profile = await this._client.fetchMe(token);
+                    updateAccountProfile(this._settings, account.id, profile);
+                    state.account = {
+                        ...state.account,
+                        profile,
+                    };
+                } catch (error) {
+                    logError(error, `[codex-usage-indicator] profile refresh failed for ${getAccountDisplayName(account)}`);
+                }
+            }
+            state.error = null;
+            state.authFailed = false;
+        } catch (error) {
+            state.error = error instanceof Error ? error.message : _('Unknown error');
+            state.authFailed = Boolean(error?.isAuthError);
+            logError(error, `[codex-usage-indicator] refresh failed for ${account.name}`);
+        }
+    }
+
+    _getAccountState(account) {
+        const existing = this._accountStates.get(account.id);
+        if (existing) {
+            existing.account = account;
+            return existing;
+        }
+
+        const state = {
+            account,
+            summary: null,
+            lastUpdated: null,
+            error: null,
+            authFailed: false,
+        };
+        this._accountStates.set(account.id, state);
+        return state;
     }
 
     _renderCurrentState() {
-        if (!this._lastSummary)
-            return;
-
+        const visibleAccounts = getVisibleAccounts(this._settings);
         const displayMode = this._getDisplayMode();
-        this._statusItem.label.text = formatSummary(this._lastSummary, displayMode);
-        this._lastUpdatedItem.label.text = `Last updated: ${this._lastUpdated.format('%F %R')}`;
-        this._setLabel(formatPanelLabel(this._lastSummary, displayMode));
-        this._renderWindows(this._lastSummary);
+
+        if (visibleAccounts.length === 0) {
+            this._statusItem.label.text = _('No accounts selected.');
+            this._lastUpdatedItem.label.text = _('Last updated: never');
+            this._setLabel(_('Codex: no accounts'));
+            this._renderAccounts([]);
+            return;
+        }
+
+        const states = visibleAccounts.map(account => this._getAccountState(account));
+        const freshStates = states.filter(state => state.summary && !state.error);
+        const staleStates = states.filter(state => state.summary && state.error);
+        const failingStates = states.filter(state => !state.summary && state.error);
+
+        this._setLabel(formatPanelLabel(states, displayMode));
+        this._statusItem.label.text = formatStatusLine(states, freshStates, staleStates, failingStates);
+        this._lastUpdatedItem.label.text = formatLastUpdatedLine(states);
+        this._renderAccounts(states);
     }
 
-    _renderWindows(summary) {
-        this._windowsSection.removeAll();
+    _renderAccounts(states) {
+        this._accountsSection.removeAll();
 
-        const windows = getVisibleWindows(summary);
-        if (windows.length === 0) {
-            const placeholder = new PopupMenu.PopupMenuItem(
-                _('No 5h or week data available.'),
+        if (states.length === 0) {
+            this._accountsSection.addMenuItem(new PopupMenu.PopupMenuItem(
+                _('Select at least one account in Settings.'),
                 {reactive: false, can_focus: false},
-            );
-            this._windowsSection.addMenuItem(placeholder);
+            ));
             return;
         }
 
-        for (const window of windows) {
-            const menuItem = new PopupMenu.PopupBaseMenuItem({
-                reactive: false,
-                can_focus: false,
-            });
+        states.forEach((state, index) => {
+            if (index > 0)
+                this._accountsSection.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-            const content = new St.BoxLayout({
-                vertical: true,
-                x_expand: true,
-            });
-            content.add_child(new St.Label({
-                text: `${window.title}  ${formatWindowValue(window, this._getDisplayMode())}`,
-                x_align: Clutter.ActorAlign.START,
-            }));
+            this._accountsSection.addMenuItem(createInfoMenuItem(
+                getAccountMenuTitle(state.account),
+                formatAccountSummary(state, this._getDisplayMode()),
+                formatAccountUpdated(state),
+            ));
 
-            const subtitle = formatWindowSubtitle(window);
-            if (subtitle) {
-                content.add_child(new St.Label({
-                    text: subtitle,
-                    style_class: 'dim-label',
-                    x_align: Clutter.ActorAlign.START,
-                }));
+            const windows = getVisibleWindows(state.summary);
+            if (windows.length === 0) {
+                this._accountsSection.addMenuItem(new PopupMenu.PopupMenuItem(
+                    _('No 5h or week data available.'),
+                    {reactive: false, can_focus: false},
+                ));
+                return;
             }
 
-            menuItem.add_child(content);
-            this._windowsSection.addMenuItem(menuItem);
-        }
+            for (const window of windows) {
+                this._accountsSection.addMenuItem(createInfoMenuItem(
+                    `${getAccountDisplayName(state.account)} · ${window.title}`,
+                    formatWindowValue(window, this._getDisplayMode()),
+                    formatWindowSubtitle(window),
+                ));
+            }
+        });
     }
 
     _restartRefreshTimer() {
@@ -273,22 +320,135 @@ export default class CodexUsageExtension extends Extension {
     }
 }
 
-function formatPanelLabel(summary, displayMode) {
-    if (displayMode === DISPLAY_MODE_USED) {
-        if (summary.used !== null)
-            return `Codex: ${formatCompact(summary.used)} used`;
+function createInfoMenuItem(title, subtitle = '', meta = '') {
+    const menuItem = new PopupMenu.PopupBaseMenuItem({
+        reactive: false,
+        can_focus: false,
+    });
 
-        if (summary.percent !== null)
-            return `Codex: ${Math.round(summary.percent * 100)}% used`;
-    } else {
-        if (summary.left !== null)
-            return `Codex: ${formatCompact(summary.left)} left`;
+    const content = new St.BoxLayout({
+        vertical: true,
+        x_expand: true,
+    });
+    content.add_child(new St.Label({
+        text: title,
+        x_align: Clutter.ActorAlign.START,
+    }));
 
-        if (summary.leftPercent !== null)
-            return `Codex: ${Math.round(summary.leftPercent * 100)}% left`;
+    if (subtitle) {
+        content.add_child(new St.Label({
+            text: subtitle,
+            style_class: 'dim-label',
+            x_align: Clutter.ActorAlign.START,
+        }));
     }
 
-    return _('Codex: n/a');
+    if (meta) {
+        content.add_child(new St.Label({
+            text: meta,
+            style_class: 'dim-label',
+            x_align: Clutter.ActorAlign.START,
+        }));
+    }
+
+    menuItem.add_child(content);
+    return menuItem;
+}
+
+function formatPanelLabel(states, displayMode) {
+    const parts = states.map(state => formatAccountPanelPart(state, displayMode));
+    return `Codex: ${parts.join(' | ')}`;
+}
+
+function formatAccountPanelPart(state, displayMode) {
+    const prefix = getAccountShortName(state.account);
+
+    if (!state.summary && state.error)
+        return `${prefix} !`;
+
+    if (!state.summary)
+        return `${prefix} --`;
+
+    const value = displayMode === DISPLAY_MODE_USED ? state.summary.used : state.summary.left;
+    const suffix = displayMode === DISPLAY_MODE_USED ? _('used') : _('left');
+
+    if (value !== null)
+        return `${prefix} ${formatCompact(value)} ${suffix}`;
+
+    const percent = displayMode === DISPLAY_MODE_USED
+        ? state.summary.percent
+        : state.summary.leftPercent;
+    if (percent !== null)
+        return `${prefix} ${Math.round(percent * 100)}% ${suffix}`;
+
+    return `${prefix} n/a`;
+}
+
+function formatStatusLine(states, freshStates, staleStates, failingStates) {
+    if (states.length === 0)
+        return _('No accounts selected.');
+
+    const parts = [];
+    if (freshStates.length > 0)
+        parts.push(`${freshStates.length} ${_('fresh')}`);
+    if (staleStates.length > 0)
+        parts.push(`${staleStates.length} ${_('stale')}`);
+    if (failingStates.length > 0)
+        parts.push(`${failingStates.length} ${_('failing')}`);
+
+    return parts.length > 0
+        ? `${states.length} ${_('accounts selected')} · ${parts.join(' · ')}`
+        : `${states.length} ${_('accounts selected')}`;
+}
+
+function formatLastUpdatedLine(states) {
+    const timestamps = states
+        .map(state => state.lastUpdated)
+        .filter(Boolean)
+        .sort((left, right) => left.to_unix() - right.to_unix());
+
+    if (timestamps.length === 0)
+        return _('Last updated: never');
+
+    const first = timestamps[0];
+    const last = timestamps[timestamps.length - 1];
+    if (first.to_unix() === last.to_unix())
+        return `Last updated: ${last.format('%F %R')}`;
+
+    return `Last updated: ${first.format('%F %R')} - ${last.format('%F %R')}`;
+}
+
+function formatAccountSummary(state, displayMode) {
+    if (!state.summary && state.error)
+        return state.error;
+
+    if (!state.summary)
+        return _('Waiting for data…');
+
+    const summaryText = formatSummary(state.summary, displayMode);
+    return state.error ? `${summaryText} (${_('stale')})` : summaryText;
+}
+
+function formatAccountUpdated(state) {
+    if (!state.lastUpdated && state.error)
+        return state.error;
+
+    if (!state.lastUpdated)
+        return _('Last updated: never');
+
+    return state.error
+        ? `Last updated: ${state.lastUpdated.format('%F %R')} (${state.error})`
+        : `Last updated: ${state.lastUpdated.format('%F %R')}`;
+}
+
+function getAccountMenuTitle(account) {
+    const displayName = getAccountDisplayName(account);
+    const email = account.profile?.email?.trim();
+
+    if (email)
+        return `${displayName} (${email})`;
+
+    return displayName;
 }
 
 function formatSummary(summary, displayMode) {

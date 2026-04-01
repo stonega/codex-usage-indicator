@@ -4,7 +4,9 @@ import Soup from 'gi://Soup?version=3.0';
 
 import {
     API_BASE_URL,
+    ME_ENDPOINT,
     PRIMARY_WINDOW_HOURS,
+    PROFILE_CACHE_TTL_SECONDS,
     SUMMARY_ENDPOINT,
     WEEK_WINDOW_DAYS,
 } from './constants.js';
@@ -73,6 +75,11 @@ export class UsageApiClient {
     async fetchSummary(token) {
         const payload = await this._getJson(SUMMARY_ENDPOINT, token);
         return normalizeSummary(payload);
+    }
+
+    async fetchMe(token) {
+        const payload = await this._getJson(ME_ENDPOINT, token);
+        return normalizeMe(payload);
     }
 
     destroy() {
@@ -164,6 +171,25 @@ export function normalizeSummary(payload) {
         windows: usageWindows,
         primaryWindow,
         weekWindow,
+        raw: payload,
+    };
+}
+
+export function shouldRefreshProfile(profile, nowUnixSeconds = Math.floor(Date.now() / 1000)) {
+    const fetchedAt = profile?.fetchedAt;
+    if (typeof fetchedAt !== 'number' || !Number.isFinite(fetchedAt))
+        return true;
+
+    return nowUnixSeconds - fetchedAt >= PROFILE_CACHE_TTL_SECONDS;
+}
+
+function normalizeMe(payload) {
+    return {
+        userId: typeof payload?.id === 'string' ? payload.id : null,
+        email: typeof payload?.email === 'string' ? payload.email : null,
+        name: typeof payload?.name === 'string' ? payload.name : null,
+        picture: typeof payload?.picture === 'string' ? payload.picture : null,
+        fetchedAt: Math.floor(Date.now() / 1000),
         raw: payload,
     };
 }

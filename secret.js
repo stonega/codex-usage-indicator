@@ -1,8 +1,8 @@
 import Secret from 'gi://Secret';
 
 import {
+    LEGACY_SECRET_TOKEN_ACCOUNT,
     SECRET_SCHEMA_NAME,
-    SECRET_TOKEN_ACCOUNT,
     SECRET_TOKEN_LABEL,
 } from './constants.js';
 
@@ -12,29 +12,35 @@ const TOKEN_SCHEMA = new Secret.Schema(
     {account: Secret.SchemaAttributeType.STRING},
 );
 
-function _attributes() {
-    return {account: SECRET_TOKEN_ACCOUNT};
+function _attributes(accountId) {
+    return {account: accountId};
 }
 
-export function loadBearerTokenSync() {
-    return Secret.password_lookup_sync(TOKEN_SCHEMA, _attributes(), null) ?? '';
+function _getTokenLabel(accountId) {
+    return accountId === LEGACY_SECRET_TOKEN_ACCOUNT
+        ? SECRET_TOKEN_LABEL
+        : `${SECRET_TOKEN_LABEL} (${accountId})`;
 }
 
-export function storeBearerTokenSync(token) {
+export function loadBearerTokenSync(accountId = LEGACY_SECRET_TOKEN_ACCOUNT) {
+    return Secret.password_lookup_sync(TOKEN_SCHEMA, _attributes(accountId), null) ?? '';
+}
+
+export function storeBearerTokenSync(token, accountId = LEGACY_SECRET_TOKEN_ACCOUNT) {
     const trimmed = token.trim();
     if (!trimmed)
-        return clearBearerTokenSync();
+        return clearBearerTokenSync(accountId);
 
     return Secret.password_store_sync(
         TOKEN_SCHEMA,
-        _attributes(),
+        _attributes(accountId),
         Secret.COLLECTION_DEFAULT,
-        SECRET_TOKEN_LABEL,
+        _getTokenLabel(accountId),
         trimmed,
         null,
     );
 }
 
-export function clearBearerTokenSync() {
-    return Secret.password_clear_sync(TOKEN_SCHEMA, _attributes(), null);
+export function clearBearerTokenSync(accountId = LEGACY_SECRET_TOKEN_ACCOUNT) {
+    return Secret.password_clear_sync(TOKEN_SCHEMA, _attributes(accountId), null);
 }

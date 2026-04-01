@@ -6,6 +6,16 @@ import Gtk from 'gi://Gtk';
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 import {
+    clearAccountProfile,
+    createAccount,
+    ensureLegacyAccountMigration,
+    getVisibleAccountIds,
+    normalizeAccountName,
+    readAccounts,
+    writeAccounts,
+    writeVisibleAccountIds,
+} from './accounts.js';
+import {
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DISPLAY_MODE_LEFT,
     DISPLAY_MODE_USED,
@@ -27,9 +37,22 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
 
         this._settings = settings;
         this._client = new UsageApiClient();
+        this._accountRows = [];
+        ensureLegacyAccountMigration(this._settings);
 
         this.add(this._buildGeneralGroup());
-        this.add(this._buildTokenGroup());
+        this.add(this._buildAccountsGroup());
+
+        this._settings.connectObject(
+            'changed::accounts-json',
+            () => this._rebuildAccountsGroup(),
+            this,
+        );
+        this._settings.connectObject(
+            'changed::visible-account-ids',
+            () => this._rebuildAccountsGroup(),
+            this,
+        );
     }
 
     _buildGeneralGroup() {
@@ -83,39 +106,114 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
         return group;
     }
 
-    _buildTokenGroup() {
-        const group = new Adw.PreferencesGroup({
-            title: _('Authentication'),
-            description: _('The bearer token is stored in the GNOME keyring via Secret Service.'),
+    _buildAccountsGroup() {
+        this._accountsGroup = new Adw.PreferencesGroup({
+            title: _('Accounts'),
+            description: _('Each account stores its bearer token in the GNOME keyring and can be shown or hidden independently.'),
         });
 
-        this._tokenRow = new Adw.PasswordEntryRow({
-            title: _('Bearer token'),
-            text: loadBearerTokenSync(),
-            show_apply_button: true,
-        });
-        this._tokenRow.connect('apply', () => {
-            this._saveToken();
-        });
-        group.add(this._tokenRow);
+        this._rebuildAccountsGroup();
+        return this._accountsGroup;
+    }
 
-        const helperRow = new Adw.ActionRow({
-            title: _('Clear stored token'),
-            subtitle: _('Remove the token from the GNOME keyring.'),
+    _rebuildAccountsGroup() {
+        for (const child of this._accountRows)
+            this._accountsGroup.remove(child);
+        this._accountRows = [];
+
+        const accounts = readAccounts(this._settings);
+        const visibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
+
+        if (accounts.length === 0) {
+            const emptyRow = new Adw.ActionRow({
+                title: _('No accounts configured'),
+                subtitle: _('Add an account and paste its bearer token to start fetching usage.'),
+            });
+            this._accountsGroup.add(emptyRow);
+            this._accountRows.push(emptyRow);
+        }
+
+        for (const account of accounts) {
+            const row = this._createAccountRow(account, visibleIds);
+            this._accountsGroup.add(row);
+            this._accountRows.push(row);
+        }
+
+        const addRow = new Adw.ActionRow({
+            title: _('Add account'),
+            subtitle: _('Create another Codex account profile.'),
         });
-        const clearButton = new Gtk.Button({
-            label: _('Clear'),
+        const addButton = new Gtk.Button({
+            label: _('Add'),
             valign: Gtk.Align.CENTER,
         });
-        clearButton.connect('clicked', () => {
-            clearBearerTokenSync();
-            this._tokenRow.text = '';
-            this._statusRow.subtitle = _('Stored token cleared.');
+        addButton.connect('clicked', () => {
+            const nextAccount = createAccount(_('Account'));
+            const nextAccounts = [...accounts, nextAccount];
+            const nextVisibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
+            nextVisibleIds.add(nextAccount.id);
+            writeAccounts(this._settings, nextAccounts);
+            writeVisibleAccountIds(this._settings, nextAccounts
+                .map(account => account.id)
+                .filter(id => nextVisibleIds.has(id)));
         });
-        helperRow.add_suffix(clearButton);
-        group.add(helperRow);
+        addRow.add_suffix(addButton);
+        this._accountsGroup.add(addRow);
+        this._accountRows.push(addRow);
+    }
 
-        this._statusRow = new Adw.ActionRow({
+    _createAccountRow(account, visibleIds) {
+        const row = new Adw.ExpanderRow({
+            title: account.name,
+            subtitle: visibleIds.has(account.id)
+                ? _('Shown in indicator and menu')
+                : _('Hidden from indicator and menu'),
+        });
+
+        const nameRow = new Adw.EntryRow({
+            title: _('Name'),
+            text: account.name,
+            show_apply_button: true,
+        });
+        nameRow.connect('apply', () => {
+            this._updateAccount(account.id, {name: nameRow.text});
+        });
+        row.add_row(nameRow);
+
+        const tokenRow = new Adw.PasswordEntryRow({
+            title: _('Bearer token'),
+            text: loadBearerTokenSync(account.id),
+            show_apply_button: true,
+        });
+        tokenRow.connect('apply', () => {
+            const token = tokenRow.text.trim();
+            if (token) {
+                storeBearerTokenSync(token, account.id);
+                clearAccountProfile(this._settings, account.id);
+                statusRow.subtitle = _('Token saved to the GNOME keyring.');
+            } else {
+                clearBearerTokenSync(account.id);
+                clearAccountProfile(this._settings, account.id);
+                statusRow.subtitle = _('Stored token cleared.');
+            }
+        });
+        row.add_row(tokenRow);
+
+        const visibilityRow = new Adw.ActionRow({
+            title: _('Show this account'),
+            subtitle: _('Controls whether this account appears in the panel indicator and popup menu.'),
+        });
+        const visibilitySwitch = new Gtk.Switch({
+            active: visibleIds.has(account.id),
+            valign: Gtk.Align.CENTER,
+        });
+        visibilitySwitch.connect('notify::active', widget => {
+            this._setAccountVisibility(account.id, widget.active);
+        });
+        visibilityRow.add_suffix(visibilitySwitch);
+        row.add_row(visibilityRow);
+
+        const statusRow = new Adw.ActionRow({
             title: _('Connection test'),
             subtitle: _('Not checked yet.'),
         });
@@ -124,32 +222,84 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
             valign: Gtk.Align.CENTER,
         });
         testButton.connect('clicked', () => {
-            void this._testToken();
+            void this._testToken(account, tokenRow, statusRow);
         });
-        this._statusRow.add_suffix(testButton);
-        group.add(this._statusRow);
+        statusRow.add_suffix(testButton);
+        row.add_row(statusRow);
 
-        return group;
+        const removeRow = new Adw.ActionRow({
+            title: _('Remove account'),
+            subtitle: _('Delete this account profile and clear its stored token.'),
+        });
+        const removeButton = new Gtk.Button({
+            label: _('Remove'),
+            valign: Gtk.Align.CENTER,
+            css_classes: ['destructive-action'],
+        });
+        removeButton.connect('clicked', () => {
+            this._removeAccount(account.id);
+        });
+        removeRow.add_suffix(removeButton);
+        row.add_row(removeRow);
+
+        return row;
     }
 
-    _saveToken() {
-        if (this._tokenRow.text.trim()) {
-            storeBearerTokenSync(this._tokenRow.text);
-            this._statusRow.subtitle = _('Token saved to the GNOME keyring.');
-        } else {
-            clearBearerTokenSync();
-            this._statusRow.subtitle = _('Stored token cleared.');
-        }
+    _updateAccount(accountId, updates) {
+        const accounts = readAccounts(this._settings);
+        const nextAccounts = accounts.map(account => {
+            if (account.id !== accountId)
+                return account;
+
+            return {
+                ...account,
+                name: normalizeAccountName(updates.name ?? account.name),
+            };
+        });
+
+        writeAccounts(this._settings, nextAccounts);
     }
 
-    async _testToken() {
-        const token = this._tokenRow.text.trim();
+    _setAccountVisibility(accountId, isVisible) {
+        const accounts = readAccounts(this._settings);
+        const visibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
+
+        if (isVisible)
+            visibleIds.add(accountId);
+        else
+            visibleIds.delete(accountId);
+
+        if (accounts.length > 0 && visibleIds.size === 0)
+            visibleIds.add(accountId);
+
+        writeVisibleAccountIds(this._settings, accounts
+            .map(account => account.id)
+            .filter(id => visibleIds.has(id)));
+    }
+
+    _removeAccount(accountId) {
+        const accounts = readAccounts(this._settings);
+        const nextAccounts = accounts.filter(account => account.id !== accountId);
+        const currentVisibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
+
+        currentVisibleIds.delete(accountId);
+        const nextVisibleIds = nextAccounts
+            .map(account => account.id)
+            .filter(id => currentVisibleIds.has(id));
+
+        writeVisibleAccountIds(this._settings, nextVisibleIds);
+        writeAccounts(this._settings, nextAccounts);
+        clearBearerTokenSync(accountId);
+    }
+
+    async _testToken(account, tokenRow, statusRow) {
+        const token = tokenRow.text.trim();
         if (!token) {
-            this._statusRow.subtitle = _('Enter a token before testing.');
+            statusRow.subtitle = _('Enter a token before testing.');
             return;
         }
 
-        this._statusRow.subtitle = _('Testing token…');
+        statusRow.subtitle = _('Testing token…');
         try {
             const summary = await this._client.fetchSummary(token);
             const displayMode = this._getDisplayMode();
@@ -158,20 +308,26 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
             const formatted = value !== null
                 ? new Intl.NumberFormat().format(Math.round(value))
                 : _('available');
-            this._statusRow.subtitle = _('Connection OK') + ` · ${formatted} ${label}`;
+            statusRow.subtitle = `${account.name} · ${_('Connection OK')} · ${formatted} ${label}`;
         } catch (error) {
             if (error instanceof UsageApiError && error.isAuthError)
-                this._statusRow.subtitle = _('Authentication failed. Check the token.');
+                statusRow.subtitle = `${account.name} · ${_('Authentication failed. Check the token.')}`;
             else if (error instanceof Error)
-                this._statusRow.subtitle = error.message;
+                statusRow.subtitle = `${account.name} · ${error.message}`;
             else
-                this._statusRow.subtitle = _('Unknown error while testing token.');
+                statusRow.subtitle = `${account.name} · ${_('Unknown error while testing token.')}`;
         }
     }
 
     _getDisplayMode() {
         const mode = this._settings.get_string('display-mode');
         return mode === DISPLAY_MODE_USED ? DISPLAY_MODE_USED : DISPLAY_MODE_LEFT;
+    }
+
+    destroy() {
+        this._settings.disconnectObject(this);
+        this._client.destroy();
+        super.destroy();
     }
 });
 

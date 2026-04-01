@@ -4,11 +4,14 @@ GNOME Shell extension for GNOME Shell `50` that shows remaining Codex usage in t
 
 ## Features
 
-- Top-bar label showing remaining or used usage
-- Popup with the latest fetch timestamp plus 5-hour and weekly usage windows
+- Multiple account profiles with per-account bearer tokens
+- Multi-select account visibility for both the top-bar label and popup menu
+- Top-bar label showing remaining or used usage for the selected accounts
+- Popup with the latest fetch timestamp plus 5-hour and weekly usage windows for each selected account
+- Cached account profile lookups from `/backend-api/me` for display names and initials
 - Configurable refresh interval
 - Toggle to show `left` or `used` values
-- Bearer token stored in the GNOME keyring through Secret Service
+- Bearer tokens stored in the GNOME keyring through Secret Service
 
 ## Files
 
@@ -35,9 +38,13 @@ GNOME Shell extension for GNOME Shell `50` that shows remaining Codex usage in t
 
 4. Open extension preferences and set:
    - `Update interval`
-   - `Bearer token`
+   - one or more accounts
+   - each account's `Bearer token`
+   - which accounts should be shown
 
 ## Notes
 
 - The extension intentionally does not store cookies or browser session state.
-- Only the bearer token is persisted, and it is stored in the GNOME keyring rather than GSettings.
+- Account metadata and visibility are stored in GSettings.
+- Cached user profile data from `/backend-api/me` is stored in GSettings per account.
+- Bearer tokens are persisted in the GNOME keyring rather than GSettings.
