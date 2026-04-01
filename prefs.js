@@ -38,21 +38,20 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
         this._settings = settings;
         this._client = new UsageApiClient();
         this._accountRows = [];
+        this._settingsSignalIds = [];
         ensureLegacyAccountMigration(this._settings);
 
         this.add(this._buildGeneralGroup());
         this.add(this._buildAccountsGroup());
 
-        this._settings.connectObject(
+        this._settingsSignalIds.push(this._settings.connect(
             'changed::accounts-json',
             () => this._rebuildAccountsGroup(),
-            this,
-        );
-        this._settings.connectObject(
+        ));
+        this._settingsSignalIds.push(this._settings.connect(
             'changed::visible-account-ids',
             () => this._rebuildAccountsGroup(),
-            this,
-        );
+        ));
     }
 
     _buildGeneralGroup() {
@@ -325,7 +324,9 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
     }
 
     destroy() {
-        this._settings.disconnectObject(this);
+        for (const signalId of this._settingsSignalIds)
+            this._settings.disconnect(signalId);
+        this._settingsSignalIds = [];
         this._client.destroy();
         super.destroy();
     }
