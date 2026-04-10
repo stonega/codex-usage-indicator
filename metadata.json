@@ -2,7 +2,7 @@
   "uuid": "codex-usage-indicator@stone.dev",
   "name": "Codex Usage Indicator",
   "description": "Shows Codex usage in the GNOME top bar and a daily usage breakdown in the popup.",
-  "version": 2,
+  "version": 3,
   "shell-version": [
     "45",
     "46",
