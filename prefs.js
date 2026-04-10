@@ -23,6 +23,7 @@ import {
 import {
     clearBearerTokenSync,
     loadBearerTokenSync,
+    normalizeBearerToken,
     storeBearerTokenSync,
 } from './secret.js';
 import {UsageApiClient, UsageApiError} from './usageApi.js';
@@ -185,9 +186,10 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
             show_apply_button: true,
         });
         tokenRow.connect('apply', () => {
-            const token = tokenRow.text.trim();
+            const token = normalizeBearerToken(tokenRow.text);
             if (token) {
                 storeBearerTokenSync(token, account.id);
+                tokenRow.text = token;
                 clearAccountProfile(this._settings, account.id);
                 statusRow.subtitle = _('Token saved to the GNOME keyring.');
             } else {
@@ -292,7 +294,7 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
     }
 
     async _testToken(account, tokenRow, statusRow) {
-        const token = tokenRow.text.trim();
+        const token = normalizeBearerToken(tokenRow.text);
         if (!token) {
             statusRow.subtitle = _('Enter a token before testing.');
             return;

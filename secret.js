@@ -22,13 +22,21 @@ function _getTokenLabel(accountId) {
         : `${SECRET_TOKEN_LABEL} (${accountId})`;
 }
 
+export function normalizeBearerToken(token) {
+    return token
+        .trim()
+        .replace(/^Bearer\s+/i, '')
+        .trim();
+}
+
 export function loadBearerTokenSync(accountId = LEGACY_SECRET_TOKEN_ACCOUNT) {
-    return Secret.password_lookup_sync(TOKEN_SCHEMA, _attributes(accountId), null) ?? '';
+    const token = Secret.password_lookup_sync(TOKEN_SCHEMA, _attributes(accountId), null) ?? '';
+    return normalizeBearerToken(token);
 }
 
 export function storeBearerTokenSync(token, accountId = LEGACY_SECRET_TOKEN_ACCOUNT) {
-    const trimmed = token.trim();
-    if (!trimmed)
+    const normalized = normalizeBearerToken(token);
+    if (!normalized)
         return clearBearerTokenSync(accountId);
 
     return Secret.password_store_sync(
@@ -36,7 +44,7 @@ export function storeBearerTokenSync(token, accountId = LEGACY_SECRET_TOKEN_ACCO
         _attributes(accountId),
         Secret.COLLECTION_DEFAULT,
         _getTokenLabel(accountId),
-        trimmed,
+        normalized,
         null,
     );
 }

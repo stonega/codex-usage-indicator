@@ -10,6 +10,7 @@ import {
     SUMMARY_ENDPOINT,
     WEEK_WINDOW_DAYS,
 } from './constants.js';
+import {normalizeBearerToken} from './secret.js';
 
 Gio._promisify(Soup.Session.prototype, 'send_and_read_async', 'send_and_read_finish');
 
@@ -87,13 +88,14 @@ export class UsageApiClient {
     }
 
     async _getJson(path, token) {
-        if (!token?.trim())
+        const normalizedToken = normalizeBearerToken(token ?? '');
+        if (!normalizedToken)
             throw new UsageApiError('A bearer token is required.');
 
         const message = Soup.Message.new('GET', `${API_BASE_URL}${path}`);
         const headers = message.get_request_headers();
         headers.append('Accept', 'application/json');
-        headers.append('Authorization', `Bearer ${token.trim()}`);
+        headers.append('Authorization', `Bearer ${normalizedToken}`);
         headers.append('Referer', 'https://chatgpt.com/codex/settings/usage');
         headers.append('oai-language', 'en-US');
         headers.append('x-openai-target-path', path);
@@ -132,10 +134,19 @@ export function decodeBytes(bytes) {
 }
 
 export function normalizeSummary(payload) {
+    const rateLimit = normalizeRateLimitSection(payload?.rate_limit, 'rate_limit');
+    const codeReviewRateLimit = normalizeRateLimitSection(
+        payload?.code_review_rate_limit,
+        'code_review_rate_limit',
+    );
+    const additionalRateLimits = normalizeAdditionalRateLimits(payload?.additional_rate_limits);
+
     const windows = normalizeRateLimitWindows(payload);
-    const usageWindows = selectUsageWindows(windows);
-    const primaryWindow = findPrimaryWindow(usageWindows);
-    const weekWindow = findWeekWindow(usageWindows);
+    const usageWindows = rateLimit?.windows?.length > 0
+        ? rateLimit.windows
+        : selectUsageWindows(windows);
+    const primaryWindow = rateLimit?.primaryWindow ?? findPrimaryWindow(usageWindows);
+    const weekWindow = rateLimit?.secondaryWindow ?? findWeekWindow(usageWindows);
     const activeWindow = primaryWindow ?? weekWindow ?? usageWindows[0] ?? null;
 
     let used = null;
@@ -160,6 +171,9 @@ export function normalizeSummary(payload) {
     const left = used !== null && limit !== null ? Math.max(limit - used, 0) : null;
 
     return {
+        userId: findFirstString(payload, ['user_id', 'id']),
+        accountId: findFirstString(payload, ['account_id']),
+        email: findFirstString(payload, ['email']),
         used,
         limit,
         left,
@@ -171,6 +185,12 @@ export function normalizeSummary(payload) {
         windows: usageWindows,
         primaryWindow,
         weekWindow,
+        rateLimit,
+        codeReviewRateLimit,
+        additionalRateLimits,
+        credits: normalizeCredits(payload?.credits),
+        spendControl: normalizeSpendControl(payload?.spend_control),
+        promo: payload?.promo ?? null,
         raw: payload,
     };
 }
@@ -185,12 +205,88 @@ export function shouldRefreshProfile(profile, nowUnixSeconds = Math.floor(Date.n
 
 function normalizeMe(payload) {
     return {
-        userId: typeof payload?.id === 'string' ? payload.id : null,
-        email: typeof payload?.email === 'string' ? payload.email : null,
+        userId: findFirstString(payload, ['id', 'user_id']),
+        email: findFirstString(payload, ['email']),
         name: typeof payload?.name === 'string' ? payload.name : null,
         picture: typeof payload?.picture === 'string' ? payload.picture : null,
         fetchedAt: Math.floor(Date.now() / 1000),
         raw: payload,
+    };
+}
+
+function normalizeRateLimitSection(section, rootKey) {
+    if (!section || typeof section !== 'object' || Array.isArray(section))
+        return null;
+
+    const windows = normalizeRateLimitWindows(section).map(window => ({
+        ...window,
+        rootKey,
+    }));
+    const primaryWindow = normalizeNamedRateLimitWindow(section.primary_window, 'primary_window', rootKey);
+    const secondaryWindow = normalizeNamedRateLimitWindow(section.secondary_window, 'secondary_window', rootKey);
+
+    return {
+        allowed: coerceBoolean(section.allowed),
+        limitReached: coerceBoolean(section.limit_reached),
+        windows,
+        primaryWindow: primaryWindow ?? findPrimaryWindow(windows),
+        secondaryWindow: secondaryWindow ?? windows[1] ?? null,
+    };
+}
+
+function normalizeAdditionalRateLimits(value) {
+    if (value === null || value === undefined)
+        return null;
+
+    if (Array.isArray(value))
+        return value.map(item => normalizeRateLimitSection(item, 'additional_rate_limits')).filter(Boolean);
+
+    if (typeof value !== 'object')
+        return null;
+
+    return Object.fromEntries(
+        Object.entries(value)
+            .map(([key, section]) => [key, normalizeRateLimitSection(section, key)])
+            .filter(([, section]) => section !== null)
+    );
+}
+
+function normalizeCredits(credits) {
+    if (!credits || typeof credits !== 'object' || Array.isArray(credits))
+        return null;
+
+    return {
+        hasCredits: coerceBoolean(credits.has_credits),
+        unlimited: coerceBoolean(credits.unlimited),
+        overageLimitReached: coerceBoolean(credits.overage_limit_reached),
+        balance: typeof credits.balance === 'string' && credits.balance.trim()
+            ? credits.balance.trim()
+            : coerceNumber(credits.balance),
+        approxLocalMessages: normalizeNumberTuple(credits.approx_local_messages),
+        approxCloudMessages: normalizeNumberTuple(credits.approx_cloud_messages),
+    };
+}
+
+function normalizeSpendControl(spendControl) {
+    if (!spendControl || typeof spendControl !== 'object' || Array.isArray(spendControl))
+        return null;
+
+    return {
+        reached: coerceBoolean(spendControl.reached),
+    };
+}
+
+function normalizeNamedRateLimitWindow(value, key, rootKey) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return null;
+
+    const window = normalizeRateLimitWindow(value, [key]);
+    if (!window)
+        return null;
+
+    return {
+        ...window,
+        rootKey,
     };
 }
 
@@ -452,6 +548,28 @@ function coerceNumber(value) {
     }
 
     return null;
+}
+
+function coerceBoolean(value) {
+    if (typeof value === 'boolean')
+        return value;
+
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'true')
+            return true;
+        if (normalized === 'false')
+            return false;
+    }
+
+    return null;
+}
+
+function normalizeNumberTuple(value) {
+    if (!Array.isArray(value))
+        return null;
+
+    return value.map(item => coerceNumber(item));
 }
 
 function normalizePercent(percent, used, limit) {
