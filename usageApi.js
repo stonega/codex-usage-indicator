@@ -4,13 +4,10 @@ import Soup from 'gi://Soup?version=3.0';
 
 import {
     API_BASE_URL,
-    ME_ENDPOINT,
     PRIMARY_WINDOW_HOURS,
-    PROFILE_CACHE_TTL_SECONDS,
     SUMMARY_ENDPOINT,
     WEEK_WINDOW_DAYS,
 } from './constants.js';
-import {normalizeBearerToken} from './secret.js';
 
 Gio._promisify(Soup.Session.prototype, 'send_and_read_async', 'send_and_read_finish');
 
@@ -53,9 +50,11 @@ const PERCENT_KEYS = [
     'utilization',
 ];
 
+const SUMMARY_REFERER = `${API_BASE_URL}/codex/cloud/settings/analytics`;
+
 export class UsageApiError extends Error {
     constructor(message, {statusCode = 0, payload = null} = {}) {
-        super(message);
+        super(String(message));
         this.name = 'UsageApiError';
         this.statusCode = statusCode;
         this.payload = payload;
@@ -78,11 +77,6 @@ export class UsageApiClient {
         return normalizeSummary(payload);
     }
 
-    async fetchMe(token) {
-        const payload = await this._getJson(ME_ENDPOINT, token);
-        return normalizeMe(payload);
-    }
-
     destroy() {
         this._session.abort();
     }
@@ -94,9 +88,11 @@ export class UsageApiClient {
 
         const message = Soup.Message.new('GET', `${API_BASE_URL}${path}`);
         const headers = message.get_request_headers();
-        headers.append('Accept', 'application/json');
+        headers.append('Accept', '*/*');
         headers.append('Authorization', `Bearer ${normalizedToken}`);
-        headers.append('Referer', 'https://chatgpt.com/codex/settings/usage');
+        headers.append('Cache-Control', 'no-cache');
+        headers.append('Pragma', 'no-cache');
+        headers.append('Referer', path === SUMMARY_ENDPOINT ? SUMMARY_REFERER : API_BASE_URL);
         headers.append('oai-language', 'en-US');
         headers.append('x-openai-target-path', path);
         headers.append('x-openai-target-route', path);
@@ -120,7 +116,7 @@ export class UsageApiClient {
         }
 
         if (statusCode < 200 || statusCode >= 300) {
-            const messageText = payload?.message || payload?.error || `Request failed with HTTP ${statusCode}.`;
+            const messageText = getErrorMessage(payload, statusCode);
             throw new UsageApiError(messageText, {statusCode, payload});
         }
 
@@ -133,6 +129,37 @@ export function decodeBytes(bytes) {
     return new TextDecoder().decode(data);
 }
 
+function getErrorMessage(payload, statusCode) {
+    for (const value of [
+        payload?.message,
+        payload?.error,
+        payload?.detail,
+        payload?.title,
+    ]) {
+        const message = normalizeErrorMessage(value);
+        if (message)
+            return message;
+    }
+
+    return `Request failed with HTTP ${statusCode}.`;
+}
+
+function normalizeErrorMessage(value) {
+    if (typeof value === 'string' && value.trim())
+        return value.trim();
+
+    if (!value || typeof value !== 'object')
+        return '';
+
+    for (const key of ['message', 'detail', 'title', 'code', 'type']) {
+        const nested = normalizeErrorMessage(value[key]);
+        if (nested)
+            return nested;
+    }
+
+    return '';
+}
+
 export function normalizeSummary(payload) {
     const rateLimit = normalizeRateLimitSection(payload?.rate_limit, 'rate_limit');
     const codeReviewRateLimit = normalizeRateLimitSection(
@@ -140,31 +167,27 @@ export function normalizeSummary(payload) {
         'code_review_rate_limit',
     );
     const additionalRateLimits = normalizeAdditionalRateLimits(payload?.additional_rate_limits);
+    const usageRateLimit = selectUsageRateLimit(rateLimit, additionalRateLimits);
+    const summaryRateLimit = rateLimit ?? usageRateLimit;
 
     const windows = normalizeRateLimitWindows(payload);
-    const usageWindows = rateLimit?.windows?.length > 0
-        ? rateLimit.windows
+    const usageWindows = summaryRateLimit?.windows?.length > 0
+        ? summaryRateLimit.windows
         : selectUsageWindows(windows);
-    const primaryWindow = rateLimit?.primaryWindow ?? findPrimaryWindow(usageWindows);
-    const weekWindow = rateLimit?.secondaryWindow ?? findWeekWindow(usageWindows);
+    const primaryWindow = summaryRateLimit?.primaryWindow ?? findPrimaryWindow(usageWindows);
+    const weekWindow = summaryRateLimit?.secondaryWindow ?? findWeekWindow(usageWindows);
     const activeWindow = primaryWindow ?? weekWindow ?? usageWindows[0] ?? null;
+    const metricSources = getUsageMetricSources(payload, summaryRateLimit);
 
-    let used = null;
-    let limit = null;
-    for (const [usedKey, limitKey] of SUMMARY_PATH_HINTS) {
-        used = findNumberByKey(payload, usedKey);
-        limit = findNumberByKey(payload, limitKey);
-        if (used !== null && limit !== null)
-            break;
-    }
+    let {used, limit} = findSummaryTotals(metricSources);
 
     if (used === null || limit === null) {
-        used = activeWindow?.used ?? findFirstNumber(payload, NUMBER_KEYS);
-        limit = activeWindow?.limit ?? findFirstNumber(payload, LIMIT_KEYS);
+        used = activeWindow?.used ?? findFirstNumberInSources(metricSources, NUMBER_KEYS);
+        limit = activeWindow?.limit ?? findFirstNumberInSources(metricSources, LIMIT_KEYS);
     }
 
     const percent = normalizePercent(
-        activeWindow?.percent ?? findFirstNumber(payload, PERCENT_KEYS),
+        activeWindow?.percent ?? findFirstNumberInSources(metricSources, PERCENT_KEYS),
         used,
         limit,
     );
@@ -185,6 +208,10 @@ export function normalizeSummary(payload) {
         windows: usageWindows,
         primaryWindow,
         weekWindow,
+        summaryRateLimit,
+        usageRateLimit,
+        limitName: summaryRateLimit?.limitName ?? null,
+        meteredFeature: summaryRateLimit?.meteredFeature ?? null,
         rateLimit,
         codeReviewRateLimit,
         additionalRateLimits,
@@ -195,23 +222,36 @@ export function normalizeSummary(payload) {
     };
 }
 
-export function shouldRefreshProfile(profile, nowUnixSeconds = Math.floor(Date.now() / 1000)) {
-    const fetchedAt = profile?.fetchedAt;
-    if (typeof fetchedAt !== 'number' || !Number.isFinite(fetchedAt))
-        return true;
+function getUsageMetricSources(payload, summaryRateLimit) {
+    const sources = [];
+    if (summaryRateLimit?.raw)
+        sources.push(summaryRateLimit.raw);
+    sources.push(payload);
 
-    return nowUnixSeconds - fetchedAt >= PROFILE_CACHE_TTL_SECONDS;
+    return sources.filter(source => source && typeof source === 'object');
 }
 
-function normalizeMe(payload) {
-    return {
-        userId: findFirstString(payload, ['id', 'user_id']),
-        email: findFirstString(payload, ['email']),
-        name: typeof payload?.name === 'string' ? payload.name : null,
-        picture: typeof payload?.picture === 'string' ? payload.picture : null,
-        fetchedAt: Math.floor(Date.now() / 1000),
-        raw: payload,
-    };
+function findSummaryTotals(sources) {
+    for (const source of sources) {
+        for (const [usedKey, limitKey] of SUMMARY_PATH_HINTS) {
+            const used = findNumberByKey(source, usedKey);
+            const limit = findNumberByKey(source, limitKey);
+            if (used !== null && limit !== null)
+                return {used, limit};
+        }
+    }
+
+    return {used: null, limit: null};
+}
+
+function findFirstNumberInSources(sources, keys) {
+    for (const source of sources) {
+        const number = findFirstNumber(source, keys);
+        if (number !== null)
+            return number;
+    }
+
+    return null;
 }
 
 function normalizeRateLimitSection(section, rootKey) {
@@ -231,6 +271,7 @@ function normalizeRateLimitSection(section, rootKey) {
         windows,
         primaryWindow: primaryWindow ?? findPrimaryWindow(windows),
         secondaryWindow: secondaryWindow ?? windows[1] ?? null,
+        raw: section,
     };
 }
 
@@ -238,17 +279,84 @@ function normalizeAdditionalRateLimits(value) {
     if (value === null || value === undefined)
         return null;
 
-    if (Array.isArray(value))
-        return value.map(item => normalizeRateLimitSection(item, 'additional_rate_limits')).filter(Boolean);
+    if (Array.isArray(value)) {
+        return value
+            .map((item, index) => normalizeAdditionalRateLimitItem(item, index))
+            .filter(Boolean);
+    }
 
     if (typeof value !== 'object')
         return null;
 
     return Object.fromEntries(
         Object.entries(value)
-            .map(([key, section]) => [key, normalizeRateLimitSection(section, key)])
+            .map(([key, section]) => {
+                const normalized = normalizeRateLimitSection(section, key);
+                if (!normalized)
+                    return [key, null];
+
+                return [key, {
+                    ...normalized,
+                    limitName: findFirstString(section, ['limit_name', 'name', 'label']) ?? key,
+                    meteredFeature: findFirstString(section, ['metered_feature', 'feature']),
+                }];
+            })
             .filter(([, section]) => section !== null)
     );
+}
+
+function normalizeAdditionalRateLimitItem(item, index) {
+    if (!item || typeof item !== 'object' || Array.isArray(item))
+        return null;
+
+    const nestedSection = normalizeRateLimitSection(
+        item.rate_limit ?? item,
+        item.limit_name ?? `additional_rate_limits.${index}`,
+    );
+    if (!nestedSection)
+        return null;
+
+    return {
+        ...nestedSection,
+        raw: item,
+        limitName: findFirstString(item, ['limit_name', 'name', 'label']),
+        meteredFeature: findFirstString(item, ['metered_feature', 'feature']),
+    };
+}
+
+function selectUsageRateLimit(rateLimit, additionalRateLimits) {
+    return findCodexRateLimit(additionalRateLimits) ?? rateLimit;
+}
+
+function findCodexRateLimit(additionalRateLimits) {
+    return getAdditionalRateLimitItems(additionalRateLimits)
+        .filter(hasRateLimitWindows)
+        .find(isCodexRateLimit) ?? null;
+}
+
+function getAdditionalRateLimitItems(value) {
+    if (Array.isArray(value))
+        return value;
+
+    if (!value || typeof value !== 'object')
+        return [];
+
+    return Object.values(value);
+}
+
+function hasRateLimitWindows(rateLimit) {
+    return Boolean(
+        rateLimit?.primaryWindow ||
+        rateLimit?.secondaryWindow ||
+        rateLimit?.windows?.length > 0,
+    );
+}
+
+function isCodexRateLimit(rateLimit) {
+    return [
+        rateLimit?.limitName,
+        rateLimit?.meteredFeature,
+    ].some(value => typeof value === 'string' && /codex/i.test(value));
 }
 
 function normalizeCredits(credits) {
@@ -570,6 +678,13 @@ function normalizeNumberTuple(value) {
         return null;
 
     return value.map(item => coerceNumber(item));
+}
+
+function normalizeBearerToken(token) {
+    return String(token)
+        .trim()
+        .replace(/^Bearer\s+/i, '')
+        .trim();
 }
 
 function normalizePercent(percent, used, limit) {

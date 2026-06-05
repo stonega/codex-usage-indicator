@@ -1,31 +1,21 @@
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 import {
-    clearAccountProfile,
-    createAccount,
-    ensureLegacyAccountMigration,
-    getVisibleAccountIds,
-    normalizeAccountName,
-    readAccounts,
-    writeAccounts,
-    writeVisibleAccountIds,
-} from './accounts.js';
+    CodexCliAuthError,
+    getCodexCliAuthPath,
+    loadCodexCliAuth,
+} from './codexAuth.js';
 import {
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DISPLAY_MODE_LEFT,
     DISPLAY_MODE_USED,
 } from './constants.js';
-import {
-    clearBearerTokenSync,
-    loadBearerTokenSync,
-    normalizeBearerToken,
-    storeBearerTokenSync,
-} from './secret.js';
 import {UsageApiClient, UsageApiError} from './usageApi.js';
 
 const CodexUsagePreferencesPage = GObject.registerClass(
@@ -38,21 +28,9 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
 
         this._settings = settings;
         this._client = new UsageApiClient();
-        this._accountRows = [];
-        this._settingsSignalIds = [];
-        ensureLegacyAccountMigration(this._settings);
 
         this.add(this._buildGeneralGroup());
-        this.add(this._buildAccountsGroup());
-
-        this._settingsSignalIds.push(this._settings.connect(
-            'changed::accounts-json',
-            () => this._rebuildAccountsGroup(),
-        ));
-        this._settingsSignalIds.push(this._settings.connect(
-            'changed::visible-account-ids',
-            () => this._rebuildAccountsGroup(),
-        ));
+        this.add(this._buildCodexCliGroup());
     }
 
     _buildGeneralGroup() {
@@ -106,217 +84,76 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
         return group;
     }
 
-    _buildAccountsGroup() {
-        this._accountsGroup = new Adw.PreferencesGroup({
-            title: _('Accounts'),
-            description: _('Each account stores its bearer token in the GNOME keyring and can be shown or hidden independently.'),
+    _buildCodexCliGroup() {
+        const group = new Adw.PreferencesGroup({
+            title: _('Codex CLI'),
+            description: _('The extension reads the bearer token from the local Codex CLI auth file.'),
         });
 
-        this._rebuildAccountsGroup();
-        return this._accountsGroup;
-    }
-
-    _rebuildAccountsGroup() {
-        for (const child of this._accountRows)
-            this._accountsGroup.remove(child);
-        this._accountRows = [];
-
-        const accounts = readAccounts(this._settings);
-        const visibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
-
-        if (accounts.length === 0) {
-            const emptyRow = new Adw.ActionRow({
-                title: _('No accounts configured'),
-                subtitle: _('Add an account and paste its bearer token to start fetching usage.'),
-            });
-            this._accountsGroup.add(emptyRow);
-            this._accountRows.push(emptyRow);
-        }
-
-        for (const account of accounts) {
-            const row = this._createAccountRow(account, visibleIds);
-            this._accountsGroup.add(row);
-            this._accountRows.push(row);
-        }
-
-        const addRow = new Adw.ActionRow({
-            title: _('Add account'),
-            subtitle: _('Create another Codex account profile.'),
+        const sourceRow = new Adw.ActionRow({
+            title: _('Token source'),
+            subtitle: getCodexCliAuthPath(),
         });
-        const addButton = new Gtk.Button({
-            label: _('Add'),
+        group.add(sourceRow);
+
+        const authRow = new Adw.ActionRow({
+            title: _('Local auth'),
+            subtitle: _('Not checked yet.'),
+        });
+        const checkButton = new Gtk.Button({
+            label: _('Check'),
             valign: Gtk.Align.CENTER,
         });
-        addButton.connect('clicked', () => {
-            const nextAccount = createAccount(_('Account'));
-            const nextAccounts = [...accounts, nextAccount];
-            const nextVisibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
-            nextVisibleIds.add(nextAccount.id);
-            writeAccounts(this._settings, nextAccounts);
-            writeVisibleAccountIds(this._settings, nextAccounts
-                .map(account => account.id)
-                .filter(id => nextVisibleIds.has(id)));
+        checkButton.connect('clicked', () => {
+            void this._updateLocalAuthStatus(authRow);
         });
-        addRow.add_suffix(addButton);
-        this._accountsGroup.add(addRow);
-        this._accountRows.push(addRow);
-    }
-
-    _createAccountRow(account, visibleIds) {
-        const row = new Adw.ExpanderRow({
-            title: account.name,
-            subtitle: visibleIds.has(account.id)
-                ? _('Shown in indicator and menu')
-                : _('Hidden from indicator and menu'),
-        });
-
-        const nameRow = new Adw.EntryRow({
-            title: _('Name'),
-            text: account.name,
-            show_apply_button: true,
-        });
-        nameRow.connect('apply', () => {
-            this._updateAccount(account.id, {name: nameRow.text});
-        });
-        row.add_row(nameRow);
-
-        const tokenRow = new Adw.PasswordEntryRow({
-            title: _('Bearer token'),
-            text: loadBearerTokenSync(account.id),
-            show_apply_button: true,
-        });
-        tokenRow.connect('apply', () => {
-            const token = normalizeBearerToken(tokenRow.text);
-            if (token) {
-                storeBearerTokenSync(token, account.id);
-                tokenRow.text = token;
-                clearAccountProfile(this._settings, account.id);
-                statusRow.subtitle = _('Token saved to the GNOME keyring.');
-            } else {
-                clearBearerTokenSync(account.id);
-                clearAccountProfile(this._settings, account.id);
-                statusRow.subtitle = _('Stored token cleared.');
-            }
-        });
-        row.add_row(tokenRow);
-
-        const visibilityRow = new Adw.ActionRow({
-            title: _('Show this account'),
-            subtitle: _('Controls whether this account appears in the panel indicator and popup menu.'),
-        });
-        const visibilitySwitch = new Gtk.Switch({
-            active: visibleIds.has(account.id),
-            valign: Gtk.Align.CENTER,
-        });
-        visibilitySwitch.connect('notify::active', widget => {
-            this._setAccountVisibility(account.id, widget.active);
-        });
-        visibilityRow.add_suffix(visibilitySwitch);
-        row.add_row(visibilityRow);
+        authRow.add_suffix(checkButton);
+        group.add(authRow);
+        void this._updateLocalAuthStatus(authRow);
 
         const statusRow = new Adw.ActionRow({
             title: _('Connection test'),
             subtitle: _('Not checked yet.'),
         });
         const testButton = new Gtk.Button({
-            label: _('Test token'),
+            label: _('Test'),
             valign: Gtk.Align.CENTER,
         });
         testButton.connect('clicked', () => {
-            void this._testToken(account, tokenRow, statusRow);
+            void this._testCodexCliToken(statusRow);
         });
         statusRow.add_suffix(testButton);
-        row.add_row(statusRow);
+        group.add(statusRow);
 
-        const removeRow = new Adw.ActionRow({
-            title: _('Remove account'),
-            subtitle: _('Delete this account profile and clear its stored token.'),
-        });
-        const removeButton = new Gtk.Button({
-            label: _('Remove'),
-            valign: Gtk.Align.CENTER,
-            css_classes: ['destructive-action'],
-        });
-        removeButton.connect('clicked', () => {
-            this._removeAccount(account.id);
-        });
-        removeRow.add_suffix(removeButton);
-        row.add_row(removeRow);
-
-        return row;
+        return group;
     }
 
-    _updateAccount(accountId, updates) {
-        const accounts = readAccounts(this._settings);
-        const nextAccounts = accounts.map(account => {
-            if (account.id !== accountId)
-                return account;
-
-            return {
-                ...account,
-                name: normalizeAccountName(updates.name ?? account.name),
-            };
-        });
-
-        writeAccounts(this._settings, nextAccounts);
-    }
-
-    _setAccountVisibility(accountId, isVisible) {
-        const accounts = readAccounts(this._settings);
-        const visibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
-
-        if (isVisible)
-            visibleIds.add(accountId);
-        else
-            visibleIds.delete(accountId);
-
-        if (accounts.length > 0 && visibleIds.size === 0)
-            visibleIds.add(accountId);
-
-        writeVisibleAccountIds(this._settings, accounts
-            .map(account => account.id)
-            .filter(id => visibleIds.has(id)));
-    }
-
-    _removeAccount(accountId) {
-        const accounts = readAccounts(this._settings);
-        const nextAccounts = accounts.filter(account => account.id !== accountId);
-        const currentVisibleIds = new Set(getVisibleAccountIds(this._settings, accounts));
-
-        currentVisibleIds.delete(accountId);
-        const nextVisibleIds = nextAccounts
-            .map(account => account.id)
-            .filter(id => currentVisibleIds.has(id));
-
-        writeVisibleAccountIds(this._settings, nextVisibleIds);
-        writeAccounts(this._settings, nextAccounts);
-        clearBearerTokenSync(accountId);
-    }
-
-    async _testToken(account, tokenRow, statusRow) {
-        const token = normalizeBearerToken(tokenRow.text);
-        if (!token) {
-            statusRow.subtitle = _('Enter a token before testing.');
-            return;
-        }
-
-        statusRow.subtitle = _('Testing token…');
+    async _updateLocalAuthStatus(row) {
         try {
-            const summary = await this._client.fetchSummary(token);
+            const auth = await loadCodexCliAuth({allowExpired: true});
+            row.subtitle = auth.expiresAt !== null
+                ? `Access token found; expires ${formatUnixTime(auth.expiresAt)}`
+                : _('Access token found; expiry not recognized.');
+        } catch (error) {
+            row.subtitle = formatPreferenceError(error);
+        }
+    }
+
+    async _testCodexCliToken(statusRow) {
+        statusRow.subtitle = _('Testing Codex CLI token...');
+
+        try {
+            const auth = await loadCodexCliAuth();
+            const summary = await this._client.fetchSummary(auth.accessToken);
             const displayMode = this._getDisplayMode();
             const value = displayMode === DISPLAY_MODE_USED ? summary.used : summary.left;
             const label = displayMode === DISPLAY_MODE_USED ? _('used') : _('left');
             const formatted = value !== null
                 ? new Intl.NumberFormat().format(Math.round(value))
                 : _('available');
-            statusRow.subtitle = `${account.name} · ${_('Connection OK')} · ${formatted} ${label}`;
+            statusRow.subtitle = `${_('Connection OK')} · ${formatted} ${label}`;
         } catch (error) {
-            if (error instanceof UsageApiError && error.isAuthError)
-                statusRow.subtitle = `${account.name} · ${_('Authentication failed. Check the token.')}`;
-            else if (error instanceof Error)
-                statusRow.subtitle = `${account.name} · ${error.message}`;
-            else
-                statusRow.subtitle = `${account.name} · ${_('Unknown error while testing token.')}`;
+            statusRow.subtitle = formatPreferenceError(error);
         }
     }
 
@@ -326,9 +163,6 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
     }
 
     destroy() {
-        for (const signalId of this._settingsSignalIds)
-            this._settings.disconnect(signalId);
-        this._settingsSignalIds = [];
         this._client.destroy();
         super.destroy();
     }
@@ -339,4 +173,22 @@ export default class CodexUsagePreferences extends ExtensionPreferences {
         const settings = this.getSettings();
         window.add(new CodexUsagePreferencesPage(settings));
     }
+}
+
+function formatUnixTime(unixSeconds) {
+    const dateTime = GLib.DateTime.new_from_unix_local(Math.round(unixSeconds));
+    return dateTime ? dateTime.format('%F %R') : _('unknown');
+}
+
+function formatPreferenceError(error) {
+    if (error instanceof CodexCliAuthError)
+        return error.message;
+
+    if (error instanceof UsageApiError && error.isAuthError)
+        return _('Codex CLI token was rejected. Run codex login.');
+
+    if (error instanceof Error)
+        return error.message;
+
+    return _('Unknown error');
 }

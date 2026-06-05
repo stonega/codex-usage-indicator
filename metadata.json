@@ -1,8 +1,8 @@
 {
   "uuid": "codex-usage-indicator@stone.dev",
   "name": "Codex Usage Indicator",
-  "description": "Shows Codex usage in the GNOME top bar and a daily usage breakdown in the popup.",
-  "version": 3,
+  "description": "Shows Codex usage from the local Codex CLI auth in the GNOME top bar.",
+  "version": 5,
   "shell-version": [
     "45",
     "46",

@@ -4,47 +4,48 @@ GNOME Shell extension for GNOME Shell `50` that shows remaining Codex usage in t
 
 ## Features
 
-- Multiple account profiles with per-account bearer tokens
-- Multi-select account visibility for both the top-bar label and popup menu
-- Top-bar label showing remaining or used usage for the selected accounts
-- Popup with the latest fetch timestamp plus 5-hour and weekly usage windows for each selected account
-- Cached account profile lookups from `/backend-api/me` for display names and initials
+- Automatically reads the bearer token from the local Codex CLI auth file at `~/.codex/auth.json`
+- Top-bar label showing remaining or used Codex usage
+- Popup with the latest fetch timestamp plus account and Codex model-specific 5-hour and weekly usage progress bars
 - Configurable refresh interval
 - Toggle to show `left` or `used` values
-- Bearer tokens stored in the GNOME keyring through Secret Service
 
 ## Files
 
 - `extension.js`: panel indicator and popup
 - `prefs.js`: settings UI
-- `secret.js`: Secret Service token storage helpers
+- `codexAuth.js`: local Codex CLI auth reader
 - `usageApi.js`: HTTP requests and response normalization
 - `schemas/`: GSettings schema
 
 ## Local install
 
-1. Copy this directory to `~/.local/share/gnome-shell/extensions/codex-usage-indicator@stone.dev`
-2. Compile the schema in place:
+1. Sign in with the Codex CLI so `~/.codex/auth.json` exists:
+
+   ```bash
+   codex login
+   ```
+
+2. Copy this directory to `~/.local/share/gnome-shell/extensions/codex-usage-indicator@stone.dev`
+3. Compile the schema in place:
 
    ```bash
    glib-compile-schemas schemas
    ```
 
-3. Enable the extension:
+4. Enable the extension:
 
    ```bash
    gnome-extensions enable codex-usage-indicator@stone.dev
    ```
 
-4. Open extension preferences and set:
+5. Open extension preferences and set:
    - `Update interval`
-   - one or more accounts
-   - each account's `Bearer token`
-   - which accounts should be shown
+   - `Display value`
+   - optionally test the Codex CLI token
 
 ## Notes
 
 - The extension intentionally does not store cookies or browser session state.
-- Account metadata and visibility are stored in GSettings.
-- Cached user profile data from `/backend-api/me` is stored in GSettings per account.
-- Bearer tokens are persisted in the GNOME keyring rather than GSettings.
+- The extension does not persist bearer tokens. It reads the current Codex CLI access token from `~/.codex/auth.json` when refreshing.
+- If the Codex CLI token expires, run `codex login` or start Codex CLI to refresh it.
