@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
@@ -18,6 +19,8 @@ import {UsageApiClient, UsageApiError} from './usageApi.js';
 
 const PROGRESS_BAR_WIDTH = 360;
 const PROGRESS_BAR_HEIGHT = 7;
+const PANEL_ICON_SIZE = 16;
+const MENU_TITLE_STYLE = 'color: #fff;';
 
 const CodexUsageIndicator = GObject.registerClass(
 class CodexUsageIndicator extends PanelMenu.Button {
@@ -40,10 +43,21 @@ class CodexUsageIndicator extends PanelMenu.Button {
         const box = new St.BoxLayout({
             style_class: 'panel-status-menu-box',
         });
-        this._label = new St.Label({
-            text: _('Codex: --'),
+        this._icon = new St.Icon({
+            gicon: Gio.icon_new_for_string(GLib.build_filenamev([
+                this._extension.path,
+                'icons',
+                'codex-symbolic.svg',
+            ])),
+            icon_size: PANEL_ICON_SIZE,
+            style_class: 'system-status-icon',
             y_align: Clutter.ActorAlign.CENTER,
         });
+        this._label = new St.Label({
+            text: _('--'),
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        box.add_child(this._icon);
         box.add_child(this._label);
         this.add_child(box);
 
@@ -70,28 +84,28 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     _buildMenu() {
-        this._statusItem = new PopupMenu.PopupMenuItem(_('Loading usage...'), {
-            reactive: false,
-            can_focus: false,
-        });
-        this.menu.addMenuItem(this._statusItem);
-
-        this._lastUpdatedItem = new PopupMenu.PopupMenuItem(_('Last updated: never'), {
-            reactive: false,
-            can_focus: false,
-        });
-        this.menu.addMenuItem(this._lastUpdatedItem);
-
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
         this._usageSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._usageSection);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        this.menu.addAction(_('Refresh now'), () => {
+        this._refreshItem = new PopupMenu.PopupBaseMenuItem();
+        this._refreshItem.add_child(new St.Label({
+            text: _('Refresh now'),
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+        }));
+        this._refreshTimestampLabel = new St.Label({
+            text: formatLastUpdatedValue(this._state),
+            style_class: 'dim-label',
+            x_align: Clutter.ActorAlign.END,
+        });
+        this._refreshItem.add_child(this._refreshTimestampLabel);
+        this._refreshItem.connect('activate', () => {
             void this.refresh();
         });
+        this.menu.addMenuItem(this._refreshItem);
+
         this.menu.addAction(_('Settings'), () => {
             this._extension.openPreferences();
         });
@@ -101,7 +115,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
         if (this._refreshInFlight)
             return this._refreshInFlight;
 
-        this._statusItem.label.text = _('Refreshing usage...');
+        this._refreshTimestampLabel.text = _('Refreshing...');
         this._refreshInFlight = this._refreshUsage()
             .catch(error => {
                 reportError(error, '[codex-usage-indicator] refresh failed');
@@ -141,8 +155,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
         const displayMode = this._getDisplayMode();
 
         this._setLabel(formatPanelLabel(this._state, displayMode));
-        this._statusItem.label.text = formatStatusLine(this._state);
-        this._lastUpdatedItem.label.text = formatLastUpdatedLine(this._state);
+        this._refreshTimestampLabel.text = formatLastUpdatedValue(this._state);
         this._renderUsage(this._state, displayMode);
     }
 
@@ -255,6 +268,7 @@ function createInfoMenuItem(title, subtitle = '', meta = '') {
     });
     content.add_child(new St.Label({
         text: title,
+        style: MENU_TITLE_STYLE,
         x_align: Clutter.ActorAlign.START,
     }));
 
@@ -291,7 +305,7 @@ function createUsageProgressMenuItem(title, window, displayMode) {
 
     content.add_child(new St.Label({
         text: title,
-        style_class: 'dim-label',
+        style: MENU_TITLE_STYLE,
         x_align: Clutter.ActorAlign.START,
     }));
 
@@ -355,44 +369,31 @@ function createProgressBar(percent, displayMode) {
 
 function formatPanelLabel(state, displayMode) {
     if (!state.summary && state.error)
-        return _('Codex: !');
+        return _('!');
 
     if (!state.summary)
-        return _('Codex: --');
+        return _('--');
 
     const value = displayMode === DISPLAY_MODE_USED ? state.summary.used : state.summary.left;
     const suffix = displayMode === DISPLAY_MODE_USED ? _('used') : _('left');
 
     if (value !== null)
-        return `Codex: ${formatCompact(value)} ${suffix}`;
+        return `${formatCompact(value)} ${suffix}`;
 
     const percent = displayMode === DISPLAY_MODE_USED
         ? state.summary.percent
         : state.summary.leftPercent;
     if (percent !== null)
-        return `Codex: ${Math.round(percent * 100)}% ${suffix}`;
+        return `${Math.round(percent * 100)}% ${suffix}`;
 
-    return _('Codex: n/a');
+    return _('n/a');
 }
 
-function formatStatusLine(state) {
-    if (state.summary && state.error)
-        return _('Showing stale usage; refresh failed.');
-
-    if (state.error)
-        return _('Unable to load Codex CLI usage.');
-
-    if (state.summary)
-        return _('Usage loaded from Codex CLI.');
-
-    return _('Waiting for usage data...');
-}
-
-function formatLastUpdatedLine(state) {
+function formatLastUpdatedValue(state) {
     if (!state.lastUpdated)
-        return _('Last updated: never');
+        return _('never');
 
-    return `Last updated: ${state.lastUpdated.format('%F %R')}`;
+    return state.lastUpdated.format('%F %R');
 }
 
 function formatUsageTitle(state) {
@@ -414,9 +415,9 @@ function formatUsageSummary(state, displayMode) {
     if (state.summary.planType)
         parts.push(formatPlanType(state.summary.planType));
 
-    const limitCount = getVisibleWindows(state.summary).length;
-    if (limitCount > 0)
-        parts.push(`${limitCount} ${limitCount === 1 ? _('usage limit') : _('usage limits')}`);
+    const resetCreditsText = formatResetCredits(state.summary.rateLimitResetCredits);
+    if (resetCreditsText)
+        parts.push(resetCreditsText);
 
     const summaryText = parts.length > 0
         ? parts.join(' · ')
@@ -509,6 +510,14 @@ function formatPlanType(planType) {
         ?? normalized
             .replace(/[_-]+/g, ' ')
             .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function formatResetCredits(rateLimitResetCredits) {
+    const availableCount = rateLimitResetCredits?.availableCount;
+    if (availableCount === null || availableCount === undefined)
+        return '';
+
+    return `${formatNumber(availableCount)} ${_('resets available')}`;
 }
 
 function getVisibleWindows(summary) {

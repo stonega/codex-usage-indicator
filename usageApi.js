@@ -1,6 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import Soup from 'gi://Soup?version=3.0';
+import Soup from 'gi://Soup';
 
 import {
     API_BASE_URL,
@@ -216,6 +216,7 @@ export function normalizeSummary(payload) {
         codeReviewRateLimit,
         additionalRateLimits,
         credits: normalizeCredits(payload?.credits),
+        rateLimitResetCredits: normalizeRateLimitResetCredits(payload?.rate_limit_reset_credits),
         spendControl: normalizeSpendControl(payload?.spend_control),
         promo: payload?.promo ?? null,
         raw: payload,
@@ -372,6 +373,15 @@ function normalizeCredits(credits) {
             : coerceNumber(credits.balance),
         approxLocalMessages: normalizeNumberTuple(credits.approx_local_messages),
         approxCloudMessages: normalizeNumberTuple(credits.approx_cloud_messages),
+    };
+}
+
+function normalizeRateLimitResetCredits(resetCredits) {
+    if (!resetCredits || typeof resetCredits !== 'object' || Array.isArray(resetCredits))
+        return null;
+
+    return {
+        availableCount: coerceNumber(resetCredits.available_count),
     };
 }
 

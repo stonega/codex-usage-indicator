@@ -1,3 +1,4 @@
 codex-usage-indicator@stone.dev.shell-extension.zip
 schemas/gschemas.compiled
 .codex
+dist/
