@@ -5,5 +5,6 @@ export const DISPLAY_MODE_USED = 'used';
 
 export const API_BASE_URL = 'https://chatgpt.com';
 export const SUMMARY_ENDPOINT = '/backend-api/wham/usage';
+export const RATE_LIMIT_RESET_CREDITS_ENDPOINT = '/backend-api/wham/rate-limit-reset-credits';
 export const PRIMARY_WINDOW_HOURS = 5;
 export const WEEK_WINDOW_DAYS = 7;

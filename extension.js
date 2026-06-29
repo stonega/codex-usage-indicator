@@ -427,8 +427,11 @@ function formatUsageSummary(state, displayMode) {
 
 function formatUsageMeta(state) {
     const parts = [];
-    if (state.auth?.expiresInSeconds !== null && state.auth?.expiresInSeconds !== undefined)
-        parts.push(`token expires in ${formatDuration(state.auth.expiresInSeconds)}`);
+
+    const resetExpiryText = formatResetCreditExpiry(state.summary?.rateLimitResetCredits);
+    if (resetExpiryText)
+        parts.push(resetExpiryText);
+
     if (state.error && state.summary)
         parts.push(state.error);
 
@@ -518,6 +521,33 @@ function formatResetCredits(rateLimitResetCredits) {
         return '';
 
     return `${formatNumber(availableCount)} ${_('resets available')}`;
+}
+
+function formatResetCreditExpiry(rateLimitResetCredits) {
+    const expiresAt = rateLimitResetCredits?.nextExpiresAt;
+    if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt))
+        return '';
+
+    const formatted = formatMenuDateTime(expiresAt);
+    if (!formatted)
+        return '';
+
+    const availableCount = rateLimitResetCredits?.availableCount;
+    const label = availableCount > 1 ? _('next reset expires') : _('reset expires');
+    return `${label} ${formatted}`;
+}
+
+function formatMenuDateTime(unixSeconds) {
+    const dateTime = GLib.DateTime.new_from_unix_local(Math.round(unixSeconds));
+    const now = GLib.DateTime.new_now_local();
+
+    if (!dateTime)
+        return '';
+
+    if (now && isSameDay(dateTime, now))
+        return dateTime.format('%H:%M');
+
+    return dateTime.format('%b %d, %Y %H:%M');
 }
 
 function getVisibleWindows(summary) {

@@ -5,6 +5,7 @@ import Soup from 'gi://Soup';
 import {
     API_BASE_URL,
     PRIMARY_WINDOW_HOURS,
+    RATE_LIMIT_RESET_CREDITS_ENDPOINT,
     SUMMARY_ENDPOINT,
     WEEK_WINDOW_DAYS,
 } from './constants.js';
@@ -50,7 +51,7 @@ const PERCENT_KEYS = [
     'utilization',
 ];
 
-const SUMMARY_REFERER = `${API_BASE_URL}/codex/cloud/settings/analytics`;
+const WHAM_REFERER = `${API_BASE_URL}/codex/cloud/settings/analytics`;
 
 export class UsageApiError extends Error {
     constructor(message, {statusCode = 0, payload = null} = {}) {
@@ -73,8 +74,11 @@ export class UsageApiClient {
     }
 
     async fetchSummary(token) {
-        const payload = await this._getJson(SUMMARY_ENDPOINT, token);
-        return normalizeSummary(payload);
+        const [payload, resetCreditsPayload] = await Promise.all([
+            this._getJson(SUMMARY_ENDPOINT, token),
+            this._getJson(RATE_LIMIT_RESET_CREDITS_ENDPOINT, token),
+        ]);
+        return normalizeSummary(payload, resetCreditsPayload);
     }
 
     destroy() {
@@ -92,7 +96,7 @@ export class UsageApiClient {
         headers.append('Authorization', `Bearer ${normalizedToken}`);
         headers.append('Cache-Control', 'no-cache');
         headers.append('Pragma', 'no-cache');
-        headers.append('Referer', path === SUMMARY_ENDPOINT ? SUMMARY_REFERER : API_BASE_URL);
+        headers.append('Referer', path.startsWith('/backend-api/wham/') ? WHAM_REFERER : API_BASE_URL);
         headers.append('oai-language', 'en-US');
         headers.append('x-openai-target-path', path);
         headers.append('x-openai-target-route', path);
@@ -160,7 +164,7 @@ function normalizeErrorMessage(value) {
     return '';
 }
 
-export function normalizeSummary(payload) {
+export function normalizeSummary(payload, resetCreditsPayload = null) {
     const rateLimit = normalizeRateLimitSection(payload?.rate_limit, 'rate_limit');
     const codeReviewRateLimit = normalizeRateLimitSection(
         payload?.code_review_rate_limit,
@@ -216,7 +220,9 @@ export function normalizeSummary(payload) {
         codeReviewRateLimit,
         additionalRateLimits,
         credits: normalizeCredits(payload?.credits),
-        rateLimitResetCredits: normalizeRateLimitResetCredits(payload?.rate_limit_reset_credits),
+        rateLimitResetCredits: normalizeRateLimitResetCredits(
+            resetCreditsPayload ?? payload?.rate_limit_reset_credits,
+        ),
         spendControl: normalizeSpendControl(payload?.spend_control),
         promo: payload?.promo ?? null,
         raw: payload,
@@ -377,12 +383,71 @@ function normalizeCredits(credits) {
 }
 
 function normalizeRateLimitResetCredits(resetCredits) {
-    if (!resetCredits || typeof resetCredits !== 'object' || Array.isArray(resetCredits))
+    if (!resetCredits)
+        return null;
+
+    const source = Array.isArray(resetCredits) ? {credits: resetCredits} : resetCredits;
+    if (typeof source !== 'object' || Array.isArray(source))
+        return null;
+
+    const credits = normalizeRateLimitResetCreditItems(source.credits);
+    const availableCredits = credits.filter(isAvailableResetCredit);
+
+    return {
+        availableCount: coerceNumber(source.available_count) ?? availableCredits.length,
+        totalEarnedCount: coerceNumber(source.total_earned_count),
+        credits,
+        nextExpiresAt: findEarliestResetCreditExpiry(availableCredits),
+        raw: resetCredits,
+    };
+}
+
+function normalizeRateLimitResetCreditItems(value) {
+    if (!Array.isArray(value))
+        return [];
+
+    return value
+        .map(normalizeRateLimitResetCreditItem)
+        .filter(Boolean);
+}
+
+function normalizeRateLimitResetCreditItem(item) {
+    if (!item || typeof item !== 'object' || Array.isArray(item))
         return null;
 
     return {
-        availableCount: coerceNumber(resetCredits.available_count),
+        id: findLocalFirstString(item, ['id']),
+        resetType: findLocalFirstString(item, ['reset_type']),
+        status: findLocalFirstString(item, ['status']),
+        title: findLocalFirstString(item, ['title']),
+        grantedAt: coerceUnixSeconds(findLocalValueByKey(item, 'granted_at')),
+        expiresAt: coerceUnixSeconds(findLocalValueByKey(item, 'expires_at')),
+        redeemStartedAt: coerceUnixSeconds(findLocalValueByKey(item, 'redeem_started_at')),
+        redeemedAt: coerceUnixSeconds(findLocalValueByKey(item, 'redeemed_at')),
+        raw: item,
     };
+}
+
+function isAvailableResetCredit(credit) {
+    const status = credit.status?.toLowerCase();
+    if (status)
+        return status === 'available';
+
+    return credit.redeemedAt === null;
+}
+
+function findEarliestResetCreditExpiry(credits) {
+    let earliest = null;
+
+    for (const credit of credits) {
+        if (typeof credit.expiresAt !== 'number' || !Number.isFinite(credit.expiresAt))
+            continue;
+
+        if (earliest === null || credit.expiresAt < earliest)
+            earliest = credit.expiresAt;
+    }
+
+    return earliest;
 }
 
 function normalizeSpendControl(spendControl) {
@@ -666,6 +731,31 @@ function coerceNumber(value) {
     }
 
     return null;
+}
+
+function coerceUnixSeconds(value) {
+    if (typeof value === 'number' && Number.isFinite(value))
+        return value > 9999999999 ? value / 1000 : value;
+
+    if (typeof value !== 'string' || !value.trim())
+        return null;
+
+    const trimmed = value.trim();
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+        const number = Number.parseFloat(trimmed);
+        return number > 9999999999 ? number / 1000 : number;
+    }
+
+    try {
+        const dateTime = GLib.DateTime.new_from_iso8601(trimmed, null);
+        if (dateTime)
+            return dateTime.to_unix();
+    } catch (error) {
+        // Fall back to JavaScript date parsing below.
+    }
+
+    const timestamp = Date.parse(trimmed);
+    return Number.isFinite(timestamp) ? timestamp / 1000 : null;
 }
 
 function coerceBoolean(value) {
