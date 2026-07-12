@@ -269,17 +269,33 @@ function normalizeRateLimitSection(section, rootKey) {
         ...window,
         rootKey,
     }));
-    const primaryWindow = normalizeNamedRateLimitWindow(section.primary_window, 'primary_window', rootKey);
-    const secondaryWindow = normalizeNamedRateLimitWindow(section.secondary_window, 'secondary_window', rootKey);
+    const namedPrimaryWindow = normalizeNamedRateLimitWindow(
+        section.primary_window,
+        'primary_window',
+        rootKey,
+    );
+    const namedSecondaryWindow = normalizeNamedRateLimitWindow(
+        section.secondary_window,
+        'secondary_window',
+        rootKey,
+    );
+    const primaryWindow = findPrimaryWindow(windows)
+        ?? findWindowWithoutDuration([namedPrimaryWindow]);
+    const secondaryWindow = findWeekWindow(windows)
+        ?? findWindowWithoutDuration([namedSecondaryWindow]);
 
     return {
         allowed: coerceBoolean(section.allowed),
         limitReached: coerceBoolean(section.limit_reached),
         windows,
-        primaryWindow: primaryWindow ?? findPrimaryWindow(windows),
-        secondaryWindow: secondaryWindow ?? windows[1] ?? null,
+        primaryWindow,
+        secondaryWindow,
         raw: section,
     };
+}
+
+function findWindowWithoutDuration(windows) {
+    return windows.find(window => window?.windowSeconds === null) ?? null;
 }
 
 function normalizeAdditionalRateLimits(value) {
@@ -302,11 +318,11 @@ function normalizeAdditionalRateLimits(value) {
                 if (!normalized)
                     return [key, null];
 
-                return [key, {
+                return [key, classifySingleSparkWindow({
                     ...normalized,
                     limitName: findFirstString(section, ['limit_name', 'name', 'label']) ?? key,
                     meteredFeature: findFirstString(section, ['metered_feature', 'feature']),
-                }];
+                })];
             })
             .filter(([, section]) => section !== null)
     );
@@ -323,11 +339,30 @@ function normalizeAdditionalRateLimitItem(item, index) {
     if (!nestedSection)
         return null;
 
-    return {
+    return classifySingleSparkWindow({
         ...nestedSection,
         raw: item,
         limitName: findFirstString(item, ['limit_name', 'name', 'label']),
         meteredFeature: findFirstString(item, ['metered_feature', 'feature']),
+    });
+}
+
+function classifySingleSparkWindow(rateLimit) {
+    const isSparkLimit = typeof rateLimit.limitName === 'string' &&
+        rateLimit.limitName.trim().toLowerCase() === 'gpt-5.3-codex-spark';
+    if (!isSparkLimit || rateLimit.windows.length !== 1)
+        return rateLimit;
+
+    const weekWindow = {
+        ...rateLimit.windows[0],
+        period: 'weekly',
+    };
+
+    return {
+        ...rateLimit,
+        windows: [weekWindow],
+        primaryWindow: null,
+        secondaryWindow: weekWindow,
     };
 }
 

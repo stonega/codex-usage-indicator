@@ -619,10 +619,18 @@ function formatLimitWindowTitle(limitName, kind, window) {
         ? `${limitName.trim()} `
         : '';
 
-    if (kind === 'primary' || isPrimaryWindow(window))
+    if (isPrimaryWindow(window))
         return `${prefix}${_('5 hour usage limit')}`;
 
-    if (kind === 'secondary' || isWeekWindow(window))
+    if (isWeekWindow(window))
+        return `${prefix}${_('Weekly usage limit')}`;
+
+    // Older responses may omit a duration. Only then use the API field name
+    // as a fallback; an explicit duration always determines the label.
+    if (window?.windowSeconds === null && kind === 'primary')
+        return `${prefix}${_('5 hour usage limit')}`;
+
+    if (window?.windowSeconds === null && kind === 'secondary')
         return `${prefix}${_('Weekly usage limit')}`;
 
     const label = typeof window?.label === 'string' && window.label.trim()
@@ -632,13 +640,16 @@ function formatLimitWindowTitle(limitName, kind, window) {
 }
 
 function isPrimaryWindow(window) {
-    return window?.windowSeconds !== null &&
+    return window?.period !== 'weekly' &&
+        window?.windowSeconds !== null &&
         Math.abs(window.windowSeconds - 5 * 3600) <= 2 * 3600;
 }
 
 function isWeekWindow(window) {
-    return window?.windowSeconds !== null &&
-        Math.abs(window.windowSeconds - 7 * 86400) <= 86400;
+    return window?.period === 'weekly' || (
+        window?.windowSeconds !== null &&
+        Math.abs(window.windowSeconds - 7 * 86400) <= 86400
+    );
 }
 
 function formatWindowValue(window, displayMode) {
