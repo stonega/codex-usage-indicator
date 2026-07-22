@@ -44,6 +44,14 @@ GNOME Shell extension for GNOME Shell `50` that shows remaining Codex usage in t
    - `Display value`
    - optionally test the Codex CLI token
 
+## Tests
+
+Run the usage normalization tests with:
+
+```bash
+gjs -m tests/usageApi.test.js
+```
+
 ## Notes
 
 - The extension intentionally does not store cookies or browser session state.

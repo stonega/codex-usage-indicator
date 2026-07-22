@@ -190,8 +190,8 @@ export function normalizeSummary(payload, resetCreditsPayload = null) {
         limit = activeWindow?.limit ?? findFirstNumberInSources(metricSources, LIMIT_KEYS);
     }
 
-    const percent = normalizePercent(
-        activeWindow?.percent ?? findFirstNumberInSources(metricSources, PERCENT_KEYS),
+    const percent = activeWindow?.percent ?? normalizePercent(
+        findFirstNumberInSources(metricSources, PERCENT_KEYS),
         used,
         limit,
     );
