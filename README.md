@@ -10,6 +10,7 @@ GNOME Shell extension for GNOME Shell `45`–`51` that shows remaining Codex usa
 - Notification when a limit resets to at least 95% remaining before its scheduled reset
 - Configurable refresh interval
 - Toggle to show `left` or `used` values
+- Choose whether reset credit expiries show time left or local date and time
 
 ## Files
 
@@ -43,6 +44,7 @@ GNOME Shell extension for GNOME Shell `45`–`51` that shows remaining Codex usa
 5. Open extension preferences and set:
    - `Update interval`
    - `Display value`
+   - `Reset credit expiry`
    - optionally test the Codex CLI token
 
 ## Tests

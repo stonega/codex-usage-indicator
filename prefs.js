@@ -15,6 +15,8 @@ import {
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DISPLAY_MODE_LEFT,
     DISPLAY_MODE_USED,
+    RESET_CREDIT_EXPIRY_MODE_DATE,
+    RESET_CREDIT_EXPIRY_MODE_LEFT,
 } from './constants.js';
 import {UsageApiClient, UsageApiError} from './usageApi.js';
 
@@ -80,6 +82,25 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
             );
         });
         group.add(displayRow);
+
+        const resetCreditExpiryRow = new Adw.ComboRow({
+            title: _('Reset credit expiry'),
+            subtitle: _('Choose how expiry times appear below the reset credit count.'),
+            model: Gtk.StringList.new([
+                _('Time left'),
+                _('Date and time'),
+            ]),
+            selected: this._getResetCreditExpiryMode() === RESET_CREDIT_EXPIRY_MODE_DATE ? 1 : 0,
+        });
+        resetCreditExpiryRow.connect('notify::selected', combo => {
+            this._settings.set_string(
+                'reset-credit-expiry-mode',
+                combo.selected === 1
+                    ? RESET_CREDIT_EXPIRY_MODE_DATE
+                    : RESET_CREDIT_EXPIRY_MODE_LEFT,
+            );
+        });
+        group.add(resetCreditExpiryRow);
 
         return group;
     }
@@ -160,6 +181,13 @@ class CodexUsagePreferencesPage extends Adw.PreferencesPage {
     _getDisplayMode() {
         const mode = this._settings.get_string('display-mode');
         return mode === DISPLAY_MODE_USED ? DISPLAY_MODE_USED : DISPLAY_MODE_LEFT;
+    }
+
+    _getResetCreditExpiryMode() {
+        const mode = this._settings.get_string('reset-credit-expiry-mode');
+        return mode === RESET_CREDIT_EXPIRY_MODE_DATE
+            ? RESET_CREDIT_EXPIRY_MODE_DATE
+            : RESET_CREDIT_EXPIRY_MODE_LEFT;
     }
 
     destroy() {

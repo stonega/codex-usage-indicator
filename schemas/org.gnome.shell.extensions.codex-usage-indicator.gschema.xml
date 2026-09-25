@@ -12,5 +12,10 @@
       <summary>Usage display mode</summary>
       <description>Choose whether the extension shows remaining quota or consumed quota.</description>
     </key>
+    <key name="reset-credit-expiry-mode" type="s">
+      <default>'left'</default>
+      <summary>Reset credit expiry display mode</summary>
+      <description>Show time left until reset credits expire or their local expiry date and time.</description>
+    </key>
   </schema>
 </schemalist>

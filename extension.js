@@ -14,6 +14,8 @@ import {
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DISPLAY_MODE_LEFT,
     DISPLAY_MODE_USED,
+    RESET_CREDIT_EXPIRY_MODE_DATE,
+    RESET_CREDIT_EXPIRY_MODE_LEFT,
 } from './constants.js';
 import {
     detectEarlyLimitResets,
@@ -82,6 +84,11 @@ class CodexUsageIndicator extends PanelMenu.Button {
         );
         this._settings.connectObject(
             'changed::display-mode',
+            () => this._renderCurrentState(),
+            this,
+        );
+        this._settings.connectObject(
+            'changed::reset-credit-expiry-mode',
             () => this._renderCurrentState(),
             this,
         );
@@ -185,19 +192,20 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
     _renderCurrentState() {
         const displayMode = this._getDisplayMode();
+        const resetCreditExpiryMode = this._getResetCreditExpiryMode();
 
         this._setLabel(formatPanelLabel(this._state, displayMode));
         this._refreshTimestampLabel.text = formatLastUpdatedValue(this._state);
-        this._renderUsage(this._state, displayMode);
+        this._renderUsage(this._state, displayMode, resetCreditExpiryMode);
     }
 
-    _renderUsage(state, displayMode) {
+    _renderUsage(state, displayMode, resetCreditExpiryMode) {
         this._usageSection.removeAll();
 
         this._usageSection.addMenuItem(createInfoMenuItem(
             formatUsageTitle(state),
             formatUsageSummary(state, displayMode),
-            formatUsageMeta(state),
+            formatUsageMeta(state, resetCreditExpiryMode),
         ));
 
         const windows = getVisibleWindows(state.summary);
@@ -246,6 +254,13 @@ class CodexUsageIndicator extends PanelMenu.Button {
     _getDisplayMode() {
         const mode = this._settings.get_string('display-mode');
         return mode === DISPLAY_MODE_USED ? DISPLAY_MODE_USED : DISPLAY_MODE_LEFT;
+    }
+
+    _getResetCreditExpiryMode() {
+        const mode = this._settings.get_string('reset-credit-expiry-mode');
+        return mode === RESET_CREDIT_EXPIRY_MODE_DATE
+            ? RESET_CREDIT_EXPIRY_MODE_DATE
+            : RESET_CREDIT_EXPIRY_MODE_LEFT;
     }
 
     destroy() {
@@ -455,10 +470,14 @@ function formatUsageSummary(state, displayMode) {
     return state.error ? `${summaryText} (${_('stale')})` : summaryText;
 }
 
-function formatUsageMeta(state) {
+function formatUsageMeta(state, resetCreditExpiryMode) {
     const parts = [];
 
-    const resetExpiryText = formatResetCreditExpiryList(state.summary?.rateLimitResetCredits);
+    const resetExpiryText = formatResetCreditExpiryList(
+        state.summary?.rateLimitResetCredits,
+        Date.now() / 1000,
+        resetCreditExpiryMode,
+    );
     if (resetExpiryText)
         parts.push(resetExpiryText);
 

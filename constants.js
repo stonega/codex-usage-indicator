@@ -2,6 +2,8 @@ export const SETTINGS_SCHEMA_ID = 'org.gnome.shell.extensions.codex-usage-indica
 export const DEFAULT_UPDATE_INTERVAL_SECONDS = 300;
 export const DISPLAY_MODE_LEFT = 'left';
 export const DISPLAY_MODE_USED = 'used';
+export const RESET_CREDIT_EXPIRY_MODE_LEFT = 'left';
+export const RESET_CREDIT_EXPIRY_MODE_DATE = 'date';
 
 export const API_BASE_URL = 'https://chatgpt.com';
 export const SUMMARY_ENDPOINT = '/backend-api/wham/usage';
