@@ -63,6 +63,8 @@ for (const properties of [['vertical'], ['vertical', 'orientation'], ['orientati
         const isVertical = content.orientation === 1 || content.vertical === true;
         if (!isVertical || !content.x_expand || content.children.length !== 3)
             throw new Error(`Menu content must remain vertical and expanded (${properties})`);
+        if (content.children[0].style !== undefined)
+            throw new Error('Menu title color must inherit from the Shell theme');
     }
 }
 

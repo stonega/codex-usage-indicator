@@ -25,7 +25,6 @@ import {UsageApiClient, UsageApiError} from './usageApi.js';
 const PROGRESS_BAR_WIDTH = 360;
 const PROGRESS_BAR_HEIGHT = 7;
 const PANEL_ICON_SIZE = 16;
-const MENU_TITLE_STYLE = 'color: #fff;';
 // GNOME 48 added orientation; GNOME 51 removed vertical.
 const VERTICAL_BOX_LAYOUT_PROPS = 'orientation' in St.BoxLayout.prototype
     ? {orientation: Clutter.Orientation.VERTICAL}
@@ -301,7 +300,6 @@ function createInfoMenuItem(title, subtitle = '', meta = '') {
     });
     content.add_child(new St.Label({
         text: title,
-        style: MENU_TITLE_STYLE,
         x_align: Clutter.ActorAlign.START,
     }));
 
@@ -338,7 +336,6 @@ function createUsageProgressMenuItem(title, window, displayMode) {
 
     content.add_child(new St.Label({
         text: title,
-        style: MENU_TITLE_STYLE,
         x_align: Clutter.ActorAlign.START,
     }));
 
