@@ -208,6 +208,13 @@ class CodexUsageIndicator extends PanelMenu.Button {
             formatUsageMeta(state, resetCreditExpiryMode),
         ));
 
+        if (state.summary?.credits) {
+            this._usageSection.addMenuItem(createInfoMenuItem(
+                _('Credit balance'),
+                formatCreditBalance(state.summary.credits),
+            ));
+        }
+
         const windows = getVisibleWindows(state.summary);
         if (windows.length === 0) {
             this._usageSection.addMenuItem(new PopupMenu.PopupMenuItem(
@@ -592,6 +599,22 @@ function formatResetCredits(rateLimitResetCredits) {
         return '';
 
     return `${formatNumber(availableCount)} ${_('resets available')}`;
+}
+
+function formatCreditBalance(credits) {
+    if (credits.unlimited)
+        return _('Unlimited');
+
+    const balance = credits.balance;
+    if (balance === null || balance === undefined || !Number.isFinite(Number(balance)))
+        return _('Unavailable');
+
+    const number = Number(balance);
+    const formatter = new Intl.NumberFormat(undefined, {maximumFractionDigits: 2});
+    const formatted = number > 0 && number < 0.01
+        ? `<${formatter.format(0.01)}`
+        : formatter.format(number);
+    return `${formatted} ${_('credits remaining')}`;
 }
 
 function getVisibleWindows(summary) {
