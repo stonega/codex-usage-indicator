@@ -7,6 +7,7 @@ GNOME Shell extension for GNOME Shell `45`–`51` that shows remaining Codex usa
 - Automatically reads the bearer token from the local Codex CLI auth file at `~/.codex/auth.json`
 - Top-bar label showing remaining or used Codex usage
 - Popup with the latest fetch timestamp plus account and Codex model-specific 5-hour and weekly usage progress bars
+- Remaining credit balance in the popup, including zero balances and unlimited credits when available
 - Notification when a limit resets to at least 95% remaining before its scheduled reset
 - Configurable refresh interval
 - Toggle to show `left` or `used` values
