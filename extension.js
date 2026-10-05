@@ -27,6 +27,7 @@ import {UsageApiClient, UsageApiError} from './usageApi.js';
 const PROGRESS_BAR_WIDTH = 360;
 const PROGRESS_BAR_HEIGHT = 7;
 const PANEL_ICON_SIZE = 16;
+const CREDIT_WARNING_REMAINING_PERCENT = 0.1;
 // GNOME 48 added orientation; GNOME 51 removed vertical.
 const VERTICAL_BOX_LAYOUT_PROPS = 'orientation' in St.BoxLayout.prototype
     ? {orientation: Clutter.Orientation.VERTICAL}
@@ -426,19 +427,41 @@ function formatPanelLabel(state, displayMode) {
     if (!state.summary)
         return _('--');
 
-    const value = displayMode === DISPLAY_MODE_USED ? state.summary.used : state.summary.left;
+    const summary = state.summary;
+    const windows = [summary.primaryWindow, summary.weekWindow]
+        .filter(window => window && (!window.rootKey || window.rootKey === 'rate_limit') &&
+            getWindowUsedPercent(window) !== null)
+        .sort((left, right) => getWindowUsedPercent(right) - getWindowUsedPercent(left));
+    const criticalWindow = windows[0];
+    const usedPercent = criticalWindow ? getWindowUsedPercent(criticalWindow) : null;
+    const balance = Number(summary.credits?.balance);
+    const showCredits = summary.credits?.unlimited === true || (Number.isFinite(balance) && balance > 0);
+    const nearLimit = showCredits && usedPercent !== null &&
+        usedPercent >= 1 - CREDIT_WARNING_REMAINING_PERCENT;
+    const limitReached = summary.rateLimit?.limitReached
+        ?? (usedPercent !== null && usedPercent >= 1);
+    const creditLabel = showCredits ? formatCreditBalance(summary.credits, true) : '';
+    if (showCredits && limitReached)
+        return state.error ? `${creditLabel}*` : creditLabel;
+
+    const quota = nearLimit ? criticalWindow : summary;
+    const value = displayMode === DISPLAY_MODE_USED ? quota.used : quota.left;
     const suffix = displayMode === DISPLAY_MODE_USED ? _('used') : _('left');
 
-    if (value !== null)
-        return `${formatCompact(value)} ${suffix}`;
-
     const percent = displayMode === DISPLAY_MODE_USED
-        ? state.summary.percent
-        : state.summary.leftPercent;
-    if (percent !== null)
-        return `${Math.round(percent * 100)}% ${suffix}`;
+        ? quota.percent
+        : quota.leftPercent;
+    let label = _('n/a');
+    if (value !== null)
+        label = `${formatCompact(value)} ${suffix}`;
+    else if (percent !== null)
+        label = `${Math.round(percent * 100)}% ${suffix}`;
+    if (nearLimit) {
+        const period = criticalWindow === summary.weekWindow ? _('Week') : _('5h');
+        label = `${period} ${label} · ${creditLabel}`;
+    }
 
-    return _('n/a');
+    return state.error && nearLimit ? `${label}*` : label;
 }
 
 function formatLastUpdatedValue(state) {
@@ -601,20 +624,22 @@ function formatResetCredits(rateLimitResetCredits) {
     return `${formatNumber(availableCount)} ${_('resets available')}`;
 }
 
-function formatCreditBalance(credits) {
-    if (credits.unlimited)
-        return _('Unlimited');
+function formatCreditBalance(credits, compact = false) {
+    if (credits?.unlimited)
+        return compact ? `∞ ${_('credits')}` : _('Unlimited');
 
-    const balance = credits.balance;
+    const balance = credits?.balance;
     if (balance === null || balance === undefined || !Number.isFinite(Number(balance)))
-        return _('Unavailable');
+        return compact ? `${_('credits')} ?` : _('Unavailable');
 
     const number = Number(balance);
     const formatter = new Intl.NumberFormat(undefined, {maximumFractionDigits: 2});
-    const formatted = number > 0 && number < 0.01
-        ? `<${formatter.format(0.01)}`
-        : formatter.format(number);
-    return `${formatted} ${_('credits remaining')}`;
+    let formatted = formatter.format(number);
+    if (number > 0 && number < 0.01)
+        formatted = `<${formatter.format(0.01)}`;
+    else if (compact && Math.abs(number) >= 1000)
+        formatted = formatCompact(number);
+    return `${formatted} ${compact ? _('credits') : _('credits remaining')}`;
 }
 
 function getVisibleWindows(summary) {

@@ -8,6 +8,7 @@ GNOME Shell extension for GNOME Shell `45`–`51` that shows remaining Codex usa
 - Top-bar label showing remaining or used Codex usage
 - Popup with the latest fetch timestamp plus account and Codex model-specific 5-hour and weekly usage progress bars
 - Remaining credit balance in the popup, including zero balances and unlimited credits when available
+- Positive or unlimited credits also appear in the top bar when either the 5-hour or weekly allowance has 10% or less remaining; exhausted limits show credits alone. Zero, unavailable, or invalid credit balances keep the original panel behavior
 - Notification when a limit resets to at least 95% remaining before its scheduled reset
 - Configurable refresh interval
 - Toggle to show `left` or `used` values
