@@ -66,3 +66,5 @@ gjs -m tests/menuLayout.test.js
 - The extension intentionally does not store cookies or browser session state.
 - The extension does not persist bearer tokens. It reads the current Codex CLI access token from `~/.codex/auth.json` when refreshing.
 - If the Codex CLI token expires, run `codex login` or start Codex CLI to refresh it.
+
+[![Listed on Vibe GNOME](https://vibe-gnome.org/badges/listed-on-vibe-gnome-light.svg)](https://vibe-gnome.org/extensions/1/codex-usage-indicator)

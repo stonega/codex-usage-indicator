@@ -323,6 +323,7 @@ function createInfoMenuItem(title, subtitle = '', meta = '') {
     });
     content.add_child(new St.Label({
         text: title,
+        style_class: 'popup-inactive-menu-item',
         x_align: Clutter.ActorAlign.START,
     }));
 
@@ -359,6 +360,7 @@ function createUsageProgressMenuItem(title, window, displayMode) {
 
     content.add_child(new St.Label({
         text: title,
+        style_class: 'popup-inactive-menu-item',
         x_align: Clutter.ActorAlign.START,
     }));
 
