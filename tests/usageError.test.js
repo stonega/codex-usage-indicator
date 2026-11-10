@@ -3,7 +3,7 @@ import GLib from 'gi://GLib';
 
 import {CodexCliAuthError} from '../codexAuth.js';
 import {UsageApiError} from '../usageApi.js';
-import {formatUsageError} from '../usageError.js';
+import {formatAccountError, formatUsageError} from '../usageError.js';
 
 function assertEqual(actual, expected, message) {
     if (!Object.is(actual, expected))
@@ -42,6 +42,10 @@ for (const statusCode of [401, 403]) {
     assertEqual(formatUsageError(new UsageApiError('Unauthorized', {statusCode})),
         'Codex CLI token was rejected. Run codex login.',
         `HTTP ${statusCode} should retain login guidance`);
+    const profile = {authPath: '/accounts/work/auth.json'};
+    const guidance = formatAccountError(new UsageApiError('Unauthorized', {statusCode}), profile);
+    assertEqual(guidance.includes("CODEX_HOME='/accounts/work'"), true,
+        'authentication guidance must target the failing account\'s home');
 }
 assertEqual(formatUsageError(new UsageApiError('Too many requests', {statusCode: 429})),
     'Too many requests', 'other API failures should preserve their message');

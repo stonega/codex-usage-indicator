@@ -2,6 +2,7 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
+import Pango from 'gi://Pango';
 import St from 'gi://St';
 
 import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -9,7 +10,9 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-import {CodexCliAuthError, loadCodexCliAuth} from './codexAuth.js';
+import {loadCodexCliAuth} from './codexAuth.js';
+import {AccountMonitor} from './accountMonitor.js';
+import {DEFAULT_ACCOUNT_ID, getAccountProfiles, getPanelAccount} from './accountProfiles.js';
 import {
     DEFAULT_UPDATE_INTERVAL_SECONDS,
     DISPLAY_MODE_LEFT,
@@ -17,12 +20,10 @@ import {
     RESET_CREDIT_EXPIRY_MODE_DATE,
     RESET_CREDIT_EXPIRY_MODE_LEFT,
 } from './constants.js';
-import {
-    detectEarlyLimitResets,
-    formatLimitResetMessage,
-} from './limitReset.js';
+import {formatLimitResetMessage} from './limitReset.js';
 import {formatResetCreditExpiryList} from './resetCreditExpiry.js';
-import {UsageApiClient, UsageApiError} from './usageApi.js';
+import {UsageApiClient} from './usageApi.js';
+import {formatAccountError} from './usageError.js';
 
 const PROGRESS_BAR_WIDTH = 360;
 const PROGRESS_BAR_HEIGHT = 7;
@@ -43,13 +44,27 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._client = new UsageApiClient();
         this._menuOpenStateChangedId = null;
         this._refreshSourceId = null;
-        this._refreshInFlight = null;
-        this._state = {
-            summary: null,
-            auth: null,
-            lastUpdated: null,
-            error: null,
-        };
+        this._destroyed = false;
+        this._accountMenus = new Map();
+        this._profiles = getAccountProfiles(this._settings.get_string('accounts'), undefined,
+            this._settings.get_string('default-account-name'));
+        this._monitor = new AccountMonitor({
+            loadAuth: loadCodexCliAuth,
+            fetchSummary: (...args) => this._client.fetchSummary(...args),
+            createCancellable: () => new Gio.Cancellable(),
+            formatError: (error, profile) => formatAccountError(error, profile, _),
+            onChanged: () => {
+                try {
+                    this._renderCurrentState();
+                } catch (error) {
+                    reportError(error, '[codex-usage-indicator] render failed');
+                }
+            },
+            onLimitResets: (profile, resets) => this._notifyLimitResets(profile, resets),
+            onError: (error, profile) => reportError(error,
+                `[codex-usage-indicator] usage refresh failed (${profile.name})`),
+        });
+        this._monitor.setProfiles(this._profiles);
 
         const box = new St.BoxLayout({
             style_class: 'panel-status-menu-box',
@@ -93,6 +108,17 @@ class CodexUsageIndicator extends PanelMenu.Button {
             () => this._renderCurrentState(),
             this,
         );
+        this._settings.connectObject('changed::accounts', () => {
+            this._reloadAccountProfiles();
+            void this.refresh();
+        }, this);
+        this._settings.connectObject('changed::default-account-name', () => {
+            this._reloadAccountProfiles();
+        }, this);
+        this._settings.connectObject('changed::panel-account-id', () => {
+            this._rebuildAccountSelector();
+            this._renderCurrentState();
+        }, this);
 
         this._restartRefreshTimer();
         this._renderCurrentState();
@@ -100,6 +126,10 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     _buildMenu() {
+        this._accountSelector = new PopupMenu.PopupSubMenuMenuItem(_('Panel account'));
+        this.menu.addMenuItem(this._accountSelector);
+        this._rebuildAccountSelector();
+
         this._usageSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._usageSection);
 
@@ -112,7 +142,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
             x_align: Clutter.ActorAlign.START,
         }));
         this._refreshTimestampLabel = new St.Label({
-            text: formatLastUpdatedValue(this._state),
+            text: _('never'),
             style_class: 'dim-label',
             x_align: Clutter.ActorAlign.END,
         });
@@ -127,63 +157,43 @@ class CodexUsageIndicator extends PanelMenu.Button {
         });
     }
 
-    async refresh() {
-        if (this._refreshInFlight)
-            return this._refreshInFlight;
-
-        this._refreshTimestampLabel.text = _('Refreshing...');
-        this._refreshInFlight = this._refreshUsage()
-            .catch(error => {
-                reportError(error, '[codex-usage-indicator] refresh failed');
-            })
-            .finally(() => {
-                this._refreshInFlight = null;
-                try {
-                    this._renderCurrentState();
-                } catch (error) {
-                    reportError(error, '[codex-usage-indicator] render failed');
-                }
-            });
-
-        return this._refreshInFlight;
+    _getPanelAccount() {
+        return getPanelAccount(this._profiles, this._settings.get_string('panel-account-id'));
     }
 
-    async _refreshUsage() {
-        try {
-            const auth = await loadCodexCliAuth();
-            const summary = await this._client.fetchSummary(auth.accessToken, auth.accountId);
-            const lastUpdated = GLib.DateTime.new_now_local();
-            const limitResets = detectEarlyLimitResets(
-                createLimitResetSnapshot(
-                    this._state.summary,
-                    this._state.auth,
-                    this._state.lastUpdated,
-                ),
-                createLimitResetSnapshot(summary, auth, lastUpdated),
-            );
-            this._state = {
-                summary,
-                auth,
-                lastUpdated,
-                error: null,
-            };
-            this._notifyLimitResets(limitResets);
-        } catch (error) {
-            this._state = {
-                ...this._state,
-                error: formatRefreshError(error),
-            };
-            reportError(error, '[codex-usage-indicator] usage refresh failed');
+    _reloadAccountProfiles() {
+        this._profiles = getAccountProfiles(this._settings.get_string('accounts'), undefined,
+            this._settings.get_string('default-account-name'));
+        this._monitor.setProfiles(this._profiles);
+        this._rebuildAccountSelector();
+        this._renderCurrentState();
+    }
+
+    _rebuildAccountSelector() {
+        const selected = this._getPanelAccount();
+        this._accountSelector.visible = this._profiles.length > 1;
+        this._accountSelector.label.text = `${_('Panel account')}: ${getAccountName(selected)}`;
+        this._accountSelector.menu.removeAll();
+        for (const profile of this._profiles) {
+            const item = new PopupMenu.PopupMenuItem(getAccountName(profile));
+            item.setOrnament(profile.id === selected.id ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+            item.connect('activate', () => this._settings.set_string('panel-account-id', profile.id));
+            this._accountSelector.menu.addMenuItem(item);
         }
     }
 
-    _notifyLimitResets(limitResets) {
+    async refresh() {
+        if (!this._destroyed)
+            await this._monitor.refresh();
+    }
+
+    _notifyLimitResets(profile, limitResets) {
         if (limitResets.length === 0)
             return;
 
         try {
             Main.notify(
-                _('Codex limit reset 🎉'),
+                `${_('Codex limit reset 🎉')} · ${getAccountName(profile)}`,
                 limitResets.map(formatLimitResetMessage).join('\n'),
             );
         } catch (error) {
@@ -192,25 +202,51 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     _renderCurrentState() {
+        if (this._destroyed)
+            return;
         const displayMode = this._getDisplayMode();
         const resetCreditExpiryMode = this._getResetCreditExpiryMode();
+        const selected = this._getPanelAccount();
+        const state = this._monitor.getState(selected.id);
+        const label = formatPanelLabel(state, displayMode);
+        this._setLabel(this._profiles.length > 1 ? `${getAccountName(selected)} · ${label}` : label);
+        this._refreshTimestampLabel.text = state.refreshing ? _('Refreshing...') : formatLastUpdatedValue(state);
 
-        this._setLabel(formatPanelLabel(this._state, displayMode));
-        this._refreshTimestampLabel.text = formatLastUpdatedValue(this._state);
-        this._renderUsage(this._state, displayMode, resetCreditExpiryMode);
+        const openAccounts = new Set([...this._accountMenus]
+            .filter(([, item]) => item.menu.isOpen).map(([id]) => id));
+        this._accountMenus.clear();
+        this._usageSection.removeAll();
+        if (this._profiles.length === 1) {
+            this._renderUsage(state, displayMode, resetCreditExpiryMode);
+            return;
+        }
+        for (const profile of this._profiles) {
+            const accountState = this._monitor.getState(profile.id);
+            const value = accountState.error ? _('Error') : formatPanelLabel(accountState, displayMode);
+            const item = new PopupMenu.PopupSubMenuMenuItem(`${getAccountName(profile)} · ${value}`);
+            this._usageSection.addMenuItem(item);
+            this._accountMenus.set(profile.id, item);
+            this._renderUsage(accountState, displayMode, resetCreditExpiryMode, item.menu);
+            item.menu.addMenuItem(new PopupMenu.PopupMenuItem(
+                accountState.refreshing ? _('Refreshing...') : `${_('Updated')}: ${formatLastUpdatedValue(accountState)}`,
+                {reactive: false, can_focus: false},
+            ));
+            if (openAccounts.has(profile.id))
+                item.menu.open(false);
+        }
     }
 
-    _renderUsage(state, displayMode, resetCreditExpiryMode) {
-        this._usageSection.removeAll();
+    _renderUsage(state, displayMode, resetCreditExpiryMode, section = this._usageSection) {
+        section.removeAll();
 
-        this._usageSection.addMenuItem(createInfoMenuItem(
+        section.addMenuItem(createInfoMenuItem(
             formatUsageTitle(state),
             formatUsageSummary(state, displayMode),
             formatUsageMeta(state, resetCreditExpiryMode),
         ));
 
         if (state.summary?.credits) {
-            this._usageSection.addMenuItem(createInfoMenuItem(
+            section.addMenuItem(createInfoMenuItem(
                 _('Credit balance'),
                 formatCreditBalance(state.summary.credits),
             ));
@@ -218,15 +254,18 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
         const windows = getVisibleWindows(state.summary);
         if (windows.length === 0) {
-            this._usageSection.addMenuItem(new PopupMenu.PopupMenuItem(
-                state.error ?? _('No 5h or week data available.'),
-                {reactive: false, can_focus: false},
-            ));
+            // The account header already contains any error, with wrapping.
+            if (!state.error) {
+                section.addMenuItem(new PopupMenu.PopupMenuItem(
+                    _('No 5h or week data available.'),
+                    {reactive: false, can_focus: false},
+                ));
+            }
             return;
         }
 
         for (const window of windows) {
-            this._usageSection.addMenuItem(createUsageProgressMenuItem(
+            section.addMenuItem(createUsageProgressMenuItem(
                 window.title,
                 window,
                 displayMode,
@@ -272,6 +311,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     destroy() {
+        this._destroyed = true;
         if (this._refreshSourceId) {
             GLib.Source.remove(this._refreshSourceId);
             this._refreshSourceId = null;
@@ -282,6 +322,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
             this.menu.disconnect(this._menuOpenStateChangedId);
             this._menuOpenStateChangedId = null;
         }
+        this._monitor.destroy();
         this._client.destroy();
         super.destroy();
     }
@@ -327,24 +368,26 @@ function createInfoMenuItem(title, subtitle = '', meta = '') {
         x_align: Clutter.ActorAlign.START,
     }));
 
-    if (subtitle) {
-        content.add_child(new St.Label({
-            text: subtitle,
-            style_class: 'dim-label',
-            x_align: Clutter.ActorAlign.START,
-        }));
-    }
+    if (subtitle)
+        content.add_child(createWrappedInfoLabel(subtitle));
 
-    if (meta) {
-        content.add_child(new St.Label({
-            text: meta,
-            style_class: 'dim-label',
-            x_align: Clutter.ActorAlign.START,
-        }));
-    }
+    if (meta)
+        content.add_child(createWrappedInfoLabel(meta));
 
     menuItem.add_child(content);
     return menuItem;
+}
+
+function createWrappedInfoLabel(text) {
+    const label = new St.Label({
+        text,
+        style_class: 'dim-label',
+        x_align: Clutter.ActorAlign.START,
+        width: PROGRESS_BAR_WIDTH,
+    });
+    label.clutter_text.line_wrap = true;
+    label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+    return label;
 }
 
 function createUsageProgressMenuItem(title, window, displayMode) {
@@ -470,11 +513,16 @@ function formatLastUpdatedValue(state) {
     if (!state.lastUpdated)
         return _('never');
 
-    return state.lastUpdated.format('%F %R');
+    return GLib.DateTime.new_from_unix_local(Math.floor(state.lastUpdated)).format('%F %R');
+}
+
+function getAccountName(profile) {
+    return profile.id === DEFAULT_ACCOUNT_ID && profile.name === 'Codex CLI'
+        ? _('Codex CLI') : profile.name;
 }
 
 function formatUsageTitle(state) {
-    const email = state.summary?.email?.trim();
+    const email = state.summary?.email?.trim() || state.auth?.email?.trim();
     if (email)
         return email;
 
@@ -517,41 +565,6 @@ function formatUsageMeta(state, resetCreditExpiryMode) {
         parts.push(state.error);
 
     return parts.join('  •  ');
-}
-
-function formatRefreshError(error) {
-    if (error instanceof CodexCliAuthError)
-        return error.message;
-
-    if (error instanceof UsageApiError && error.isAuthError)
-        return _('Codex CLI token was rejected. Run codex login.');
-
-    if (error instanceof Error)
-        return error.message;
-
-    return _('Unknown error');
-}
-
-function createLimitResetSnapshot(summary, auth, observedAt) {
-    return {
-        accountId: getUsageAccountId(summary, auth),
-        observedAt: observedAt?.to_unix?.(),
-        summary,
-    };
-}
-
-function getUsageAccountId(summary, auth) {
-    for (const value of [
-        auth?.accountId,
-        summary?.accountId,
-        summary?.userId,
-        summary?.email,
-    ]) {
-        if (typeof value === 'string' && value.trim())
-            return value.trim();
-    }
-
-    return null;
 }
 
 function formatSummary(summary, displayMode) {

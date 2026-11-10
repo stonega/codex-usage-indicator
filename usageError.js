@@ -1,7 +1,15 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
+import {CodexCliAuthError, getCodexCliLoginCommand} from './codexAuth.js';
 import {UsageApiError} from './usageApi.js';
+
+export function formatAccountError(error, profile, gettext = message => message) {
+    const message = formatUsageError(error, gettext);
+    if (error instanceof CodexCliAuthError || (error instanceof UsageApiError && error.isAuthError))
+        return `${message} ${gettext('For this account:')} ${getCodexCliLoginCommand(profile.authPath)}`;
+    return message;
+}
 
 export function formatUsageError(error, gettext = message => message) {
     if (error instanceof UsageApiError && error.isAuthError)

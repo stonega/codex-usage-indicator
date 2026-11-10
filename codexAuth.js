@@ -7,11 +7,12 @@ const EXPIRY_SKEW_SECONDS = 30;
 Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
 
 export class CodexCliAuthError extends Error {
-    constructor(message, {path = null, expired = false} = {}) {
+    constructor(message, {path = null, expired = false, identity = null} = {}) {
         super(message);
         this.name = 'CodexCliAuthError';
         this.path = path;
         this.expired = expired;
+        this.identity = identity;
     }
 }
 
@@ -24,9 +25,23 @@ export function getCodexCliAuthPath() {
     return GLib.build_filenamev([basePath, AUTH_FILENAME]);
 }
 
-export async function loadCodexCliAuth({allowExpired = false} = {}) {
-    const path = getCodexCliAuthPath();
-    const payload = await readAuthPayload(path);
+export function resolveCodexCliAuthPath(path = getCodexCliAuthPath()) {
+    let resolved = path.trim();
+    if (resolved.startsWith('~/'))
+        resolved = GLib.build_filenamev([GLib.get_home_dir(), resolved.slice(2)]);
+    if (!GLib.path_is_absolute(resolved))
+        throw new CodexCliAuthError('Use an absolute path or ~/ for the Codex CLI auth file.', {path});
+    return GLib.canonicalize_filename(resolved, null);
+}
+
+export function getCodexCliLoginCommand(path) {
+    const directory = GLib.path_get_dirname(resolveCodexCliAuthPath(path));
+    return `CODEX_HOME=${GLib.shell_quote(directory)} codex -c 'cli_auth_credentials_store="file"' login`;
+}
+
+export async function loadCodexCliAuth({path = getCodexCliAuthPath(), allowExpired = false, cancellable = null} = {}) {
+    path = resolveCodexCliAuthPath(path);
+    const payload = await readAuthPayload(path, cancellable);
     const tokens = payload?.tokens && typeof payload.tokens === 'object'
         ? payload.tokens
         : {};
@@ -41,18 +56,27 @@ export async function loadCodexCliAuth({allowExpired = false} = {}) {
         );
     }
 
-    const expiresAt = getJwtExpiresAt(accessToken);
+    const claims = getJwtClaims(accessToken);
+    const idClaims = getJwtClaims(tokens.id_token);
+    const identity = {
+        accountId: typeof tokens.account_id === 'string' ? tokens.account_id : null,
+        userId: typeof claims.sub === 'string' ? claims.sub
+            : typeof idClaims.sub === 'string' ? idClaims.sub : null,
+        email: typeof idClaims.email === 'string' ? idClaims.email : null,
+    };
+    const expiresAt = typeof claims.exp === 'number' && Number.isFinite(claims.exp)
+        ? claims.exp : null;
     const now = Math.floor(Date.now() / 1000);
     if (!allowExpired && expiresAt !== null && expiresAt <= now + EXPIRY_SKEW_SECONDS) {
         throw new CodexCliAuthError(
             'Codex CLI token is expired. Run codex login or start Codex CLI to refresh it.',
-            {path, expired: true},
+            {path, expired: true, identity},
         );
     }
 
     return {
         accessToken,
-        accountId: typeof tokens.account_id === 'string' ? tokens.account_id : null,
+        ...identity,
         expiresAt,
         expiresInSeconds: expiresAt !== null ? Math.max(expiresAt - now, 0) : null,
         lastRefresh: typeof payload?.last_refresh === 'string' ? payload.last_refresh : null,
@@ -60,10 +84,10 @@ export async function loadCodexCliAuth({allowExpired = false} = {}) {
     };
 }
 
-async function readAuthPayload(path) {
+async function readAuthPayload(path, cancellable) {
     let contents;
     try {
-        [contents] = await Gio.File.new_for_path(path).load_contents_async(null);
+        [contents] = await Gio.File.new_for_path(path).load_contents_async(cancellable);
     } catch (error) {
         throw new CodexCliAuthError(
             `Codex CLI auth not found at ${path}. Run codex login.`,
@@ -81,18 +105,16 @@ async function readAuthPayload(path) {
     }
 }
 
-function getJwtExpiresAt(token) {
-    const parts = token.split('.');
+function getJwtClaims(token) {
+    const parts = typeof token === 'string' ? token.split('.') : [];
     if (parts.length !== 3)
-        return null;
+        return {};
 
     try {
         const claims = JSON.parse(decodeBase64Url(parts[1]));
-        return typeof claims.exp === 'number' && Number.isFinite(claims.exp)
-            ? claims.exp
-            : null;
+        return claims && typeof claims === 'object' ? claims : {};
     } catch (error) {
-        return null;
+        return {};
     }
 }
 
