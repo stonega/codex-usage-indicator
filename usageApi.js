@@ -75,13 +75,13 @@ export class UsageApiClient {
         this._session = new Soup.Session(sessionProperties);
     }
 
-    async fetchSummary(token, accountId = null) {
+    async fetchSummary(token, accountId = null, cancellable = null) {
         const normalizedAccountId = normalizeAccountId(accountId);
-        const payloadPromise = this._getJson(SUMMARY_ENDPOINT, token, normalizedAccountId);
+        const payloadPromise = this._getJson(SUMMARY_ENDPOINT, token, normalizedAccountId, cancellable);
         const resetCreditsPromise = normalizedAccountId
-            ? this._fetchResetCredits(token, normalizedAccountId)
+            ? this._fetchResetCredits(token, normalizedAccountId, cancellable)
             : payloadPromise.then(payload =>
-                this._fetchResetCredits(token, normalizeAccountId(payload?.account_id))
+                this._fetchResetCredits(token, normalizeAccountId(payload?.account_id), cancellable)
             );
         const [payload, resetCreditsPayload] = await Promise.all([
             payloadPromise,
@@ -94,9 +94,9 @@ export class UsageApiClient {
         this._session.abort();
     }
 
-    async _fetchResetCredits(token, accountId) {
+    async _fetchResetCredits(token, accountId, cancellable) {
         try {
-            return await this._getJson(RATE_LIMIT_RESET_CREDITS_ENDPOINT, token, accountId);
+            return await this._getJson(RATE_LIMIT_RESET_CREDITS_ENDPOINT, token, accountId, cancellable);
         } catch (error) {
             if (error instanceof UsageApiError && error.statusCode === 429)
                 return null;
@@ -105,7 +105,7 @@ export class UsageApiClient {
         }
     }
 
-    async _getJson(path, token, accountId = null) {
+    async _getJson(path, token, accountId = null, cancellable = null) {
         const normalizedToken = normalizeBearerToken(token ?? '');
         if (!normalizedToken)
             throw new UsageApiError('A bearer token is required.');
@@ -127,7 +127,7 @@ export class UsageApiClient {
         const bytes = await this._session.send_and_read_async(
             message,
             GLib.PRIORITY_DEFAULT,
-            null,
+            cancellable,
         );
 
         const statusCode = message.status_code;

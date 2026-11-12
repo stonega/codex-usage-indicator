@@ -24,8 +24,13 @@ function setJsonResponse(message, statusCode, payload) {
 
 const requestCounts = new Map();
 const requestAccountIds = new Map();
+const credentials = [];
 const server = new Soup.Server();
 server.add_handler(null, (_server, message, path) => {
+    credentials.push({path,
+        token: message.get_request_headers().get_one('Authorization'),
+        accountId: message.get_request_headers().get_one('ChatGPT-Account-Id'),
+    });
     requestCounts.set(path, (requestCounts.get(path) ?? 0) + 1);
     const accountIds = requestAccountIds.get(path) ?? [];
     accountIds.push(message.get_request_headers().get_one('ChatGPT-Account-Id'));
@@ -107,6 +112,29 @@ Promise.resolve()
             'summary endpoint should be requested once per refresh');
         assertEqual(requestCounts.get(RATE_LIMIT_RESET_CREDITS_ENDPOINT), 3,
             'reset-credit endpoint should be requested once per refresh');
+
+        const start = credentials.length;
+        await Promise.all([
+            client.fetchSummary('first-token', 'auth-account'),
+            client.fetchSummary('second-token', 'payload-account'),
+        ]);
+        assertEqual(credentials.length - start, 4, 'two accounts should each fetch usage and reset credits');
+        for (const request of credentials.slice(start)) {
+            assertEqual(request.token, request.accountId === 'auth-account' ? 'Bearer first-token' : 'Bearer second-token',
+                'concurrent requests must keep each token paired with its account ID');
+        }
+        const cancellable = new Gio.Cancellable();
+        cancellable.cancel();
+        let cancelled = false;
+        try {
+            await client.fetchSummary('cancelled-token', 'auth-account', cancellable);
+        } catch (error) {
+            cancelled = error.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
+        }
+        assertEqual(cancelled, true, 'cancellation must propagate to HTTP requests');
+        const stillWorking = await client.fetchSummary('remaining-token', 'payload-account');
+        assertEqual(stillWorking.primaryWindow?.percent, 0.25,
+            'cancelling one account must leave the shared client usable');
     })
     .catch(error => {
         testError = error;

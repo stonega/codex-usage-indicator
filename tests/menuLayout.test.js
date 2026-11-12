@@ -13,6 +13,7 @@ class Actor {
     constructor(params = {}) {
         Object.assign(this, params);
         this.children = [];
+        this.clutter_text = {};
     }
 
     add_child(child) {
@@ -20,6 +21,19 @@ class Actor {
     }
 
     set_position() {}
+}
+
+class SubMenu extends Actor {
+    constructor(text) {
+        super();
+        this.label = {text};
+        this.menu = {
+            items: [], isOpen: false,
+            removeAll() { this.items = []; },
+            addMenuItem(item) { this.items.push(item); },
+            open() { this.isOpen = true; },
+        };
+    }
 }
 
 // Exercise both menu builders with the properties available in each Shell API.
@@ -39,17 +53,21 @@ for (const properties of [['vertical'], ['vertical', 'orientation'], ['orientati
     const {createInfoMenuItem, createUsageProgressMenuItem, CodexUsageIndicator, formatPanelLabel} = new Function(
         'St', 'Clutter', 'GObject', 'PanelMenu', 'PopupMenu', 'Extension', '_', 'DISPLAY_MODE_USED',
         'formatResetCreditExpiryList',
+        'DEFAULT_ACCOUNT_ID', 'GLib', 'Pango',
         `${source}\nreturn {createInfoMenuItem, createUsageProgressMenuItem, CodexUsageIndicator, formatPanelLabel};`,
     )(
         {BoxLayout, Label: Actor, Widget: Actor},
         {Orientation: {VERTICAL: 1}, ActorAlign: {START: 0}, FixedLayout: class {}},
         {registerClass: klass => klass},
         {Button: Actor},
-        {PopupBaseMenuItem: Actor, PopupMenuItem: Actor},
+        {PopupBaseMenuItem: Actor, PopupMenuItem: Actor, PopupSubMenuMenuItem: SubMenu},
         class {},
         text => text,
         'used',
         formatResetCreditExpiryList,
+        'default',
+        {DateTime: {new_from_unix_local: () => ({format: () => '2026-11-10 10:00'})}},
+        {EllipsizeMode: {NONE: 0}},
     );
 
     const items = [
@@ -71,6 +89,9 @@ for (const properties of [['vertical'], ['vertical', 'orientation'], ['orientati
         if (content.children[0].style !== undefined)
             throw new Error('Menu title color must inherit from the Shell theme');
     }
+    if (!items[0].children[0].children[1].clutter_text.line_wrap ||
+        items[0].children[0].children[1].width !== 360)
+        throw new Error('Account details and long authentication guidance must wrap within the popup');
 
     for (const [credits, expected] of [
         [{balance: '1234.567890'}, `${new Intl.NumberFormat().format(1234.57)} credits remaining`],
@@ -217,6 +238,51 @@ for (const properties of [['vertical'], ['vertical', 'orientation'], ['orientati
     }]});
     if (formatPanelLabel({summary: independentLimit, error: null}, 'left') !== '5% left')
         throw new Error('An independent model flag must not trigger credit billing display');
+
+    const profiles = [{id: 'default', name: 'Codex CLI'}, {id: 'work', name: 'Work'}];
+    const states = new Map(profiles.map((profile, index) => [profile.id, {
+        summary: normalizeSummary({email: `${profile.id}@example.test`, rate_limit: {
+            primary_window: {used_percent: index ? 20 : 60, window_seconds: 5 * 3600},
+        }}),
+        lastUpdated: 1000,
+        error: null,
+    }]));
+    let selected = profiles[1];
+    let panelText;
+    const indicator = {
+        _profiles: profiles,
+        _accountMenus: new Map(),
+        _monitor: {getState: id => states.get(id)},
+        _getPanelAccount: () => selected,
+        _getDisplayMode: () => 'left',
+        _getResetCreditExpiryMode: () => 'left',
+        _setLabel: text => { panelText = text; },
+        _refreshTimestampLabel: {},
+        _usageSection: {items: [], removeAll() { this.items = []; }, addMenuItem(item) { this.items.push(item); }},
+        _renderUsage: CodexUsageIndicator.prototype._renderUsage,
+    };
+    const render = () => CodexUsageIndicator.prototype._renderCurrentState.call(indicator);
+    render();
+    if (panelText !== 'Work · 80% left' || indicator._usageSection.items.length !== 2)
+        throw new Error('The panel must select one account while the popup contains both');
+    for (const profile of profiles) {
+        const item = indicator._accountMenus.get(profile.id);
+        if (item.menu.items[0].children[0].children[0].text !== `${profile.id}@example.test`)
+            throw new Error('Each account submenu must contain only its own identity and data');
+    }
+    indicator._accountMenus.get('work').menu.open();
+    selected = profiles[0];
+    render();
+    if (panelText !== 'Codex CLI · 40% left' || !indicator._accountMenus.get('work').menu.isOpen)
+        throw new Error('Changing panel account must preserve expanded account details');
+    states.set('work', {...states.get('work'), error: 'Offline'});
+    render();
+    if (indicator._accountMenus.get('work').label.text !== 'Work · Error' || panelText !== 'Codex CLI · 40% left')
+        throw new Error('An account error must remain visible without affecting another account');
+    profiles[0].name = 'Personal';
+    render();
+    if (panelText !== 'Personal · 40% left' || indicator._accountMenus.get('default').label.text !== 'Personal · 40% left')
+        throw new Error('A main-account alias must appear in both the panel and the account popup');
 }
 
 print('menu layout tests passed');
