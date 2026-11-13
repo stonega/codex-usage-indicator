@@ -8,7 +8,7 @@ On Debian/Ubuntu/Xubuntu:
 
 ```bash
 sudo apt install xfce4-genmon-plugin gjs gir1.2-soup-3.0
-git clone https://github.com/WaylonSmithersJr/codex-usage-indicator.git "$HOME/.local/share/codex-usage-indicator"
+git clone https://github.com/stonega/codex-usage-indicator.git "$HOME/.local/share/codex-usage-indicator"
 ```
 
 Sign in with Codex CLI using file-backed credentials (`~/.codex/auth.json`). If your Codex CLI uses another home, you can pass its file explicitly. Add **Generic Monitor** to the Xfce panel, open **Properties**, and set **Command** to the absolute path command below (replace `<your-user>`):
@@ -40,4 +40,4 @@ node --test tests/xfceFormat.test.mjs tests/xfceRunner.test.mjs
 gjs -m xfce/genmon.js --auth-file /tmp/codex-indicator-missing-auth.json
 ```
 
-The second command should show a Genmon `Codex ?` element and safe login guidance. The fork's CI installs GJS/Libsoup and runs these checks plus the shared auth/API parser tests. A live visual panel test still requires a machine with Xfce and `xfce4-genmon-plugin`; this headless repository check does not claim that visual sign-off.
+The second command should show a Genmon `Codex ?` element and safe login guidance. CI installs GJS/Libsoup and runs these checks plus the shared auth/API parser tests. A live visual panel test still requires a machine with Xfce and `xfce4-genmon-plugin`; this headless repository check does not claim that visual sign-off.

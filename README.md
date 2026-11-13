@@ -2,7 +2,7 @@
 
 GNOME Shell extension for GNOME Shell `45`–`51` that shows remaining Codex usage in the top bar and displays the current 5-hour and weekly windows in the popup.
 
-**Xfce:** GNOME Shell extensions cannot run in the Xfce panel. This fork also includes a [Generic Monitor (Genmon) adapter](xfce/README.md) that uses the same Codex auth reader and usage API normalizer; it does not require GNOME Shell.
+**Xfce:** GNOME Shell extensions cannot run in the Xfce panel. A [Generic Monitor (Genmon) adapter](xfce/README.md) uses the same Codex auth reader and usage API normalizer without requiring GNOME Shell.
 
 ## Features
 
