@@ -1,0 +1,36 @@
+name: Xfce Genmon
+
+on:
+  push:
+    paths:
+      - 'xfce/**'
+      - 'tests/xfce*.mjs'
+      - 'codexAuth.js'
+      - 'usageApi.js'
+      - '.github/workflows/xfce.yml'
+  pull_request:
+    paths:
+      - 'xfce/**'
+      - 'tests/xfce*.mjs'
+      - 'codexAuth.js'
+      - 'usageApi.js'
+      - '.github/workflows/xfce.yml'
+
+jobs:
+  genmon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GJS runtime
+        run: sudo apt-get update && sudo apt-get install -y gjs gir1.2-soup-3.0
+      - name: Test formatting and account handoff
+        run: node --test tests/xfceFormat.test.mjs tests/xfceRunner.test.mjs
+      - name: Prove CLI loads without GNOME Shell
+        run: |
+          output=$(gjs -m xfce/genmon.js --auth-file /tmp/codex-indicator-missing-auth.json)
+          test "$output" = '<txt>Codex ?</txt><tool>Codex CLI login required; check the auth file or run codex login.</tool>'
+      - name: Run shared parser checks
+        run: |
+          gjs -m tests/codexAuth.test.js
+          gjs -m tests/usageApi.test.js
+          gjs -m tests/usageApiHttp.test.js
