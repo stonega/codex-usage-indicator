@@ -29,12 +29,9 @@ export class AccountMonitor {
         Object.assign(this, {loadAuth, fetchSummary, formatError, now,
             createCancellable, onChanged, onLimitResets, onError});
         this._entries = new Map();
-        this._destroyed = false;
     }
 
     setProfiles(profiles) {
-        if (this._destroyed)
-            return;
         const previous = this._entries;
         this._entries = new Map(profiles.map(profile => {
             const entry = previous.get(profile.id);
@@ -60,7 +57,7 @@ export class AccountMonitor {
 
     refreshAccount(id) {
         const entry = this._entries.get(id);
-        if (!entry || this._destroyed)
+        if (!entry)
             return Promise.resolve();
         if (entry.inFlight)
             return entry.inFlight;
@@ -120,13 +117,13 @@ export class AccountMonitor {
     }
 
     _isCurrent(entry) {
-        return !this._destroyed && this._entries.get(entry.profile.id) === entry;
+        return this._entries.get(entry.profile.id) === entry;
     }
 
     destroy() {
-        this._destroyed = true;
-        for (const entry of this._entries.values())
-            entry.cancellable?.cancel();
+        const entries = [...this._entries.values()];
         this._entries.clear();
+        for (const entry of entries)
+            entry.cancellable?.cancel();
     }
 }

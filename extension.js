@@ -44,7 +44,6 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._client = new UsageApiClient();
         this._menuOpenStateChangedId = null;
         this._refreshSourceId = null;
-        this._destroyed = false;
         this._accountMenus = new Map();
         this._profiles = getAccountProfiles(this._settings.get_string('accounts'), undefined,
             this._settings.get_string('default-account-name'));
@@ -183,8 +182,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     async refresh() {
-        if (!this._destroyed)
-            await this._monitor.refresh();
+        await this._monitor.refresh();
     }
 
     _notifyLimitResets(profile, limitResets) {
@@ -202,8 +200,6 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     _renderCurrentState() {
-        if (this._destroyed)
-            return;
         const displayMode = this._getDisplayMode();
         const resetCreditExpiryMode = this._getResetCreditExpiryMode();
         const selected = this._getPanelAccount();
@@ -311,7 +307,6 @@ class CodexUsageIndicator extends PanelMenu.Button {
     }
 
     destroy() {
-        this._destroyed = true;
         if (this._refreshSourceId) {
             GLib.Source.remove(this._refreshSourceId);
             this._refreshSourceId = null;
@@ -323,7 +318,12 @@ class CodexUsageIndicator extends PanelMenu.Button {
             this._menuOpenStateChangedId = null;
         }
         this._monitor.destroy();
+        this._monitor = null;
         this._client.destroy();
+        this._client = null;
+        this._accountMenus.clear();
+        this._settings = null;
+        this._extension = null;
         super.destroy();
     }
 });

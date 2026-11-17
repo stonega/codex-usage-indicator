@@ -101,10 +101,12 @@ replacement.destroy();
 const notices = [];
 let remaining = 0.2;
 let now = 1000;
-const notifying = new AccountMonitor({
+let notificationChanges = 0;
+let notifying = new AccountMonitor({
     loadAuth: async ({path}) => auths[path],
     fetchSummary: async () => summary(remaining),
     now: () => now,
+    onChanged: () => { notificationChanges++; },
     onLimitResets: (profile, resets) => notices.push({id: profile.id, resets}),
 });
 notifying.setProfiles(profiles);
@@ -120,11 +122,47 @@ const late = deferred();
 notifying.fetchSummary = () => late.promise;
 const requestAtShutdown = notifying.refreshAccount('b');
 await Promise.resolve();
+const changesAtShutdown = notificationChanges;
 notifying.destroy();
+notifying = null;
 late.resolve(summary(1));
 await requestAtShutdown;
-assert(notices.length === 1 && notifying.getState('b').summary === null,
+assert(notices.length === 1 && notificationChanges === changesAtShutdown,
     'Disabling the monitor must discard pending responses and notifications');
+
+// Shutdown cancels either async stage without allowing late callbacks or starting another request.
+for (const stage of ['auth', 'summary']) {
+    for (const outcome of ['resolve', 'reject']) {
+        const pending = deferred();
+        let cancelled = 0;
+        let fetches = 0;
+        const callbacks = [];
+        let closing = new AccountMonitor({
+            loadAuth: () => stage === 'auth' ? pending.promise : Promise.resolve(auths['/a/auth.json']),
+            fetchSummary: () => { fetches++; return pending.promise; },
+            createCancellable: () => ({cancel() { cancelled++; }}),
+            onChanged: () => callbacks.push('changed'),
+            onLimitResets: () => callbacks.push('reset'),
+            onError: () => callbacks.push('error'),
+        });
+        closing.setProfiles([profiles[0]]);
+        const refreshAtShutdown = closing.refreshAccount('a');
+        await Promise.resolve();
+        const callbacksAtShutdown = callbacks.length;
+        closing.destroy();
+        closing = null;
+        assert(cancelled === 1, `Shutdown must cancel the pending ${stage} request`);
+        if (outcome === 'resolve')
+            pending.resolve(stage === 'auth' ? auths['/a/auth.json'] : summary(1));
+        else
+            pending.reject(new Error('Cancelled'));
+        await refreshAtShutdown;
+        assert(callbacks.length === callbacksAtShutdown,
+            `A late ${stage} ${outcome} must not call back after shutdown`);
+        assert(fetches === (stage === 'auth' ? 0 : 1),
+            'Auth completion after shutdown must not start a usage request');
+    }
+}
 
 // Older auth files can rely on account identity supplied by the usage endpoint.
 remaining = 0.2;
